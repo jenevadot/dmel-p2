@@ -638,7 +638,10 @@ def _worker(rows: np.ndarray):
     block = f["X"][rows][:, :, ch].astype(np.float64)
 
     n = len(rows)
-    rimf = np.zeros((n, K, block.shape[1]), dtype=np.float32)
+    # float16 here, not float32: this array crosses the pickle pipe to the
+    # parent, and the parent stores float16 anyway. Casting in the worker
+    # halves the bytes in flight for free.
+    rimf = np.zeros((n, K, block.shape[1]), dtype=np.float16)
     se_r = np.zeros((n, K), dtype=np.float32)
     se_o = np.zeros(n, dtype=np.float32)
     nimf = np.zeros(n, dtype=np.uint8)
@@ -656,7 +659,7 @@ def build_cache(
     cfg: dict,
     out_path: Optional[Path] = None,
     n_proc: int = 12,
-    block: int = 256,
+    block: int = 32,
     limit: Optional[int] = None,
     verbose: bool = True,
 ) -> Path:
@@ -666,6 +669,23 @@ def build_cache(
     Workers compute, the PARENT writes: h5py has no concurrent-writer safety
     without MPI. Each block sets its `done` flag LAST, so a crash mid-block
     loses at most `block` windows.
+
+    Why block defaults to 32 and not 256
+    ────────────────────────────────────
+    Measured: one window takes ~1.74 s. A 256-row block is therefore ~7.4 min
+    of work inside a worker before it returns ANYTHING — so for the first 7-8
+    minutes every worker is silent, nothing is flushed, and `done` stays all
+    False. The first run died in exactly that window (BrokenPipeError on
+    `send_bytes`, 6 leaked semaphores) and lost every window it had computed
+    except one block's worth: 256 of 272,142 = 0.094% after hours of wall time.
+
+    Block 32 flushes every ~56 s per worker. Checkpoint granularity is what
+    protects the run, and the per-block overhead (one h5 read + one pickle) is
+    negligible against 56 s of compute.
+
+    A worker crash no longer kills the run: `imap_unordered` is consumed
+    defensively so one failed block is logged and skipped rather than
+    propagating out of the `with` and discarding the whole pool's progress.
     """
     import multiprocessing as mp
 
@@ -704,13 +724,29 @@ def build_cache(
         blocks = [todo[i:i + block] for i in range(0, len(todo), block)]
         t0 = time.time()
         done_rows = 0
+        failed_blocks = 0
 
         ctx = mp.get_context("spawn")
+        # maxtasksperchild recycles workers periodically. CEEMDAN allocates
+        # heavily per window and this run is long; recycling bounds any slow
+        # leak in a worker rather than letting it grow for 17 h.
         with ctx.Pool(n_proc, initializer=_worker_init,
-                      initargs=(h5_path, cfg)) as pool:
-            for rows, rimf, se_r, se_o, nimf, degc in pool.imap_unordered(
-                    _worker, blocks, chunksize=1):
-                out["rimf"][rows] = rimf.astype(np.float16)
+                      initargs=(h5_path, cfg), maxtasksperchild=64) as pool:
+            it = pool.imap_unordered(_worker, blocks, chunksize=1)
+            while True:
+                try:
+                    rows, rimf, se_r, se_o, nimf, degc = next(it)
+                except StopIteration:
+                    break
+                except Exception as e:
+                    # One bad block must not discard the pool's other results.
+                    # The rows stay `done=False` and are retried on re-run.
+                    failed_blocks += 1
+                    print(f"\n[decompose] block failed ({type(e).__name__}: "
+                          f"{e}); continuing, will retry on next run")
+                    continue
+
+                out["rimf"][rows] = rimf
                 out["se_rimf"][rows] = se_r
                 out["se_original"][rows] = se_o
                 out["n_imf"][rows] = nimf
@@ -726,7 +762,10 @@ def build_cache(
                     print(f"\r[decompose] {done_rows:,}/{len(todo):,}  "
                           f"{rate:.1f} win/s  ETA {eta:.0f} min", end="")
         if verbose:
-            print(f"\n[decompose] done in {(time.time()-t0)/60:.1f} min")
+            msg = f"\n[decompose] done in {(time.time()-t0)/60:.1f} min"
+            if failed_blocks:
+                msg += f"  ({failed_blocks} block(s) failed — re-run to retry)"
+            print(msg)
 
     return out_path
 
@@ -878,7 +917,8 @@ def _cli():
     ap = argparse.ArgumentParser(description="Build the RIMF cache.")
     ap.add_argument("--split", choices=["train", "test"], default="train")
     ap.add_argument("--n-proc", type=int, default=12)
-    ap.add_argument("--block", type=int, default=256)
+    ap.add_argument("--block", type=int, default=32,
+                    help="rows per worker task; small = frequent checkpoints")
     ap.add_argument("--limit", type=int, default=None,
                     help="only decompose the first N rows (smoke test)")
     ap.add_argument("--n-trials", type=int, default=None)
