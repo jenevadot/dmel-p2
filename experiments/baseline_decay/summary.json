@@ -1,0 +1,19 @@
+{
+  "name": "baseline_decay",
+  "is_baseline": true,
+  "selection_split": "none",
+  "report_split": "dev",
+  "dev_median_nse": 0.48893534857637044,
+  "dev_mean_nse": 0.0528212482966344,
+  "dev_median_kge": 0.4276074247694363,
+  "dev_pct_nse_05": 47.83464566929133,
+  "dev_pct_nse_07": 11.41732283464567,
+  "horizon_nse": {
+    "h1_12": 0.9136114888515887,
+    "h13_24": 0.6024561172212107,
+    "h25_36": 0.3408567094749177,
+    "h37_48": 0.1939520578937916
+  },
+  "n_params": 0,
+  "total_minutes": 0.0
+}

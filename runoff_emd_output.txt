@@ -1,0 +1,485 @@
+
+==============================================================================
+              0.  VALIDATION AGAINST THE ORIGINAL CEEMDAN PAPER               
+==============================================================================
+
+  Torres, Colominas, Schlotthauer & Flandrin (ICASSP 2011), Fig. 1, decompose
+  a 512-sample DELTA FUNCTION -- the hardest possible case for EMD, because a
+  delta is maximally intermittent (one spike, nothing else).
+  Their reported result:  EEMD -> 13 modes,  CEEMDAN -> 9 modes.
+  (Fewer modes is better: it means less spurious splitting of one event.)
+
+  Running our from-scratch implementations on the same signal:
+
+    EEMD    (I=500, eps=0.02) ... 7 modes
+    CEEMDAN (I=500, eps=0.02) ... 7 modes
+
+    paper:  EEMD 13,  CEEMDAN 9
+    ours:   EEMD 7,  CEEMDAN 7
+
+  HONEST REPORT: the mode-COUNT gap did NOT reproduce, and it is worth
+  understanding why rather than hiding it.
+
+    * A delta function has exactly ONE maximum and ONE minimum, so plain EMD
+      on it returns ZERO modes -- verified. Every mode that EEMD or CEEMDAN
+      produce here therefore comes ENTIRELY FROM THE ADDED NOISE. That is
+      precisely Wu & Huang's original argument for why noise helps at all.
+    * So the mode count is set by the dyadic depth of the NOISE decomposition.
+      Our EMD yields 8 modes on 512 samples of white noise (log2(512)=9), and
+      both ensemble methods saturate at 7 regardless of the max_imf cap.
+    * The paper's EEMD=13 arises from EEMD OVER-SPLITTING -- spurious extra
+      modes. That over-splitting depends on the sifting stopping criterion.
+      Ours uses a fixed 8 iterations; theirs uses the Rilling/Flandrin Cauchy
+      criterion, which sifts far more aggressively and thus over-splits more.
+      Our simpler sifting is too gentle to manufacture the spurious modes,
+      so the gap collapses.
+
+  This is a limitation of THIS toy implementation, not a refutation of the
+  paper. The property that actually matters for DMEL does reproduce exactly:
+
+    EEMD    |x - (sum IMF + res)| RMSE = 2.783e-03
+    CEEMDAN |x - (sum IMF + res)| RMSE = 0.000e+00   <- exact
+
+  CEEMDAN reconstructs EXACTLY (Eq.5 of the paper, "complete"); EEMD does not.
+  That is the property DMEL's additive Eq.14 depends on, and it is verified.
+
+
+==============================================================================
+         A.  A SYNTHETIC DAILY RUNOFF SERIES WITH KNOWN GROUND TRUTH          
+==============================================================================
+
+  N = 1461 days (4 years -- exactly DMEL's record length).
+  Built from FOUR known components, so we can test what EMD recovers:
+
+    baseflow  slow groundwater store, ~1600-day drift        <- very low freq
+    seasonal  annual snowmelt/monsoon cycle, period 365      <- low freq
+    flood     Poisson storm arrivals + exponential recession <- INTERMITTENT
+    noise     gauge measurement error, white                 <- high freq
+
+  The 'flood' term is the troublemaker: it is present for a few days, then
+  absent for weeks. That intermittency is exactly what breaks plain EMD.
+
+  statistics:  min 13.0   max 865.6   mean 64.2   std 50.6   m3/s
+  (DMEL Shuangpai for comparison:  min 3.3   max 6420   mean 332   std 510)
+
+  log10 q(t): total runoff, 4 years  (log scale -- floods span 2 decades)
+          █                                                                     
+          ██                  █ █                   █                           
+          ██ ██  █          █ █ █ █ █         █     ██                   █ █    
+      █ ████████ ██    ██ █ █████████     █  ██ ████████ █          ████████   █
+  ████████    ████████████████   ███████ ███ ██████████████      ███████████████
+  ███ ██          ███ █████        █████████████     ███████████████     ███████
+                                       ██████         ████████████              
+
+  ground-truth baseflow
+  █████████████████████████████                                                 
+                              ██████████                                 ███████
+                                       ███████████████████████████████████      
+
+  ground-truth seasonal
+         █████               █████              █████               █████       
+        ██   ██             ██   ██            ██   ██             ██   ██      
+  ███████·····███████████████·····██████████████·····███████████████·····███████
+
+  ground-truth flood
+          █                                                                     
+          █                                         █                           
+  ██████████████████████████████████████████████████████████████████████████████
+
+  ground-truth noise
+   █████████ ██ ██████ ██  █████████████ ███████████████████████ ██████████ ████
+  ██████████████████████████████████████████████████████████████████████████████
+  ██████████████████████████████████████████████████████████████████████████████
+
+
+==============================================================================
+                     B.  MODE MIXING: WHY PLAIN EMD FAILS                     
+==============================================================================
+
+  Recall: sifting interpolates between CONSECUTIVE EXTREMA. When a flood
+  pulse arrives, the local extrema density suddenly jumps; when it passes,
+  it collapses again. The sifting cannot track a single scale through that
+  discontinuity, so one physical process LEAKS ACROSS SEVERAL IMFs and one
+  IMF ends up containing SEVERAL scales. That is mode mixing.
+
+  plain EMD  ->  8 IMFs + residual
+
+  CORRELATION OF EACH IMF WITH EACH GROUND-TRUTH COMPONENT
+  (a CLEAN decomposition would show ONE dominant number per row)
+
+           period     noise     flood  seasonal  baseflow  amp swing  verdict
+  --------------------------------------------------------------------------
+  IMF1        3.2     0.126    -0.017    -0.061    -0.036        4.7x   MIXED
+  IMF2        6.9     0.018     0.501     0.001    -0.006        4.7x   MIXED
+  IMF3       14.5     0.015     0.362    -0.034    -0.021        3.4x   MIXED
+  IMF4       27.8     0.027     0.355    -0.050    -0.025        2.6x   MIXED
+  IMF5       55.1     0.041     0.242    -0.020     0.057        1.4x   clean
+  IMF6      121.8     0.035     0.231     0.406    -0.180        1.2x   clean
+  IMF7      265.6    -0.008     0.154     0.460     0.156        1.2x   clean
+  IMF8      584.4     0.021     0.101     0.350     0.243        0.7x   clean
+  res                -0.028     0.055    -0.010     0.921
+  --------------------------------------------------------------------------
+
+  Read the 'amp swing' column: std(IMF during storms) / std(IMF in quiet
+  periods). A genuine IMF has ONE characteristic scale, so its amplitude
+  should be roughly stationary -> swing near 1. Large swing means the mode
+  switches regime -- it is acting as a flood detector in one place and as
+  something else elsewhere. THAT is mode mixing, measured without needing
+  any ground truth at all.
+
+
+  WHERE DID THE 'flood' COMPONENT GO?
+  share of flood-correlated energy per IMF:
+
+    IMF1     1.3%  █
+    IMF2    35.9%  ████████████████████
+    IMF3    14.9%  ████████
+    IMF4    13.5%  ███████
+    IMF5     7.6%  ████
+    IMF6    12.4%  ███████
+    IMF7     9.9%  █████
+    IMF8     4.5%  ██
+
+  The single 'flood' process is spread over MANY IMFs
+  (top-2 IMFs hold only 51% of it). It has been SMEARED.
+  A forecaster then has to learn the same physical process several times,
+  in several channels, from several partial views of it.
+
+  ZOOM on a storm sequence, days 560-700:
+
+  ground-truth flood pulses
+    █     █                                                                     
+    ██    ██                  █                 █                               
+    ██    █ █               █ ██                ██                              
+  ███·█████··███████████████·█··█████████████████·██████████████████████████████
+
+  EMD IMF1  (corr with flood = -0.017)
+  ███   ███                 █ █                 █                               
+  ·██··█·███·███████████████████████████████████████████████████████████████████
+    ████  █ ██               █                  ██                              
+
+  EMD IMF2  (corr with flood = +0.501)
+    ███   ████                                  ██                              
+  ··█··█··█··███████████████████████████████████████████████████████████████████
+  ██   ███                                                                      
+
+  EMD IMF3  (corr with flood = +0.362)
+    ███       ██             ██           ██    ███                             
+  ·█···█····████████████···███·███·██████████··██··█···█████████████████████████
+  █     █████     █     ███      ██         ████    ███                         
+
+  EMD IMF4  (corr with flood = +0.355)
+    ███████████            ██████                ██                             
+  ███··········███·······███·····███··········███··█████·███████████████████████
+                 ████████           ██████████          █                       
+
+  Each of IMF1..IMF4 shows a piece of the SAME pulses. That is the
+  smearing, visible directly.
+
+
+==============================================================================
+                   C.  EEMD AND CEEMDAN FIX IT -- MEASURED                    
+==============================================================================
+
+  Both add noise so that extrema exist at EVERY scale at EVERY time, so the
+  dyadic filter bank stops losing track during intermittency.
+     EEMD    : average the IMFs of K noisy copies.
+     CEEMDAN : inject the noise's OWN modes, stage by stage, residue by
+               residue -> reconstruction becomes EXACT.
+
+  Using DMEL's exact settings: eps = 0.2, K = 100.
+
+  running EEMD    (K=100) ... done -> 9 IMFs
+  running CEEMDAN (K=100) ... done -> 9 IMFs + residual
+
+  (1) RECONSTRUCTION ERROR  -- can you sum the parts back to the whole?
+      This matters because DMEL's Eq.14 ADDS its per-component forecasts.
+
+      EMD     (IMFs + residual)              RMSE    0.0000  =  0.0000% of signal RMS
+      EEMD    (mean IMFs + mean residual)    RMSE   17.1344  = 20.9693% of signal RMS
+      CEEMDAN (IMFs + residual)              RMSE    0.0000  =  0.0000% of signal RMS
+
+      EMD and CEEMDAN are EXACT -- error is float round-off only, because
+      each residue is DEFINED by subtraction.
+      EEMD is not exact even when its residuals are averaged in properly
+      (as done here): the added noise only cancels as 1/sqrt(K), and the
+      per-realization mode counts differ so the averaging is inconsistent.
+      That residual error is a hard floor under any model which SUMS its
+      per-component forecasts, which is exactly what DMEL's Eq.14 does.
+
+  (2) MODE-COUNT STABILITY across the 100 EEMD realizations:
+      7 IMFs :  13 runs  ██████
+      8 IMFs :  76 runs  ████████████████████████████████████████
+      9 IMFs :  11 runs  █████
+      -> EEMD produced 3 DIFFERENT mode counts. Averaging "IMF5"
+         across runs can therefore average NON-COMPARABLE modes.
+         CEEMDAN is sequential/deterministic: one fixed mode count. 
+
+  (3) MODE MIXING, TWO WAYS
+      (a) energy share of a ground-truth component held by its best 2 IMFs
+          -> higher is better (the process is CONCENTRATED, not smeared)
+      (b) worst amplitude swing across the high-frequency IMFs
+          -> lower is better (modes keep ONE scale, no regime switching)
+
+      method        flood top2 share   seasonal top2 share   worst swing
+      --------------------------------------------------------------------
+      EMD                      58.0%                 78.1%          4.7x
+      EEMD                     54.2%                 81.5%          4.1x
+      CEEMDAN                  47.2%                 88.6%          4.1x
+      --------------------------------------------------------------------
+
+      SINGLE-SEED NUMBERS ARE NOT TRUSTWORTHY HERE -- see the robustness
+      check below before drawing any conclusion from the table above.
+
+  (3b) ROBUSTNESS CHECK: repeat on 3 INDEPENDENT synthetic series
+       (different storm sequences, different noise; K=40 to keep it quick)
+
+          series method     flood top2  seasonal top2  worst swing
+       ------------------------------------------------------------------
+        20260205 EMD             58.0%          78.1%         4.7x
+        20260205 EEMD            57.8%          78.7%         3.7x
+        20260205 CEEMDAN         47.4%          91.2%         3.7x
+               7 EMD             56.2%          96.9%         5.6x
+               7 EEMD            48.5%          94.0%         5.3x
+               7 CEEMDAN         37.6%          77.9%         6.7x
+              99 EMD             58.8%          97.7%         4.2x
+              99 EEMD            57.6%          85.2%         3.8x
+              99 CEEMDAN         44.9%          79.3%         4.0x
+       ------------------------------------------------------------------
+            MEAN EMD             57.6%          90.9%         4.8x  (seas. sd 9.1pt)
+            MEAN EEMD            54.6%          86.0%         4.3x  (seas. sd 6.2pt)
+            MEAN CEEMDAN         43.3%          82.8%         4.8x  (seas. sd 6.0pt)
+
+       WHAT SURVIVES REPLICATION, AND WHAT DOES NOT:
+
+       NOT ROBUST -- the seasonal-concentration ranking. It FLIPS SIGN between
+         series (CEEMDAN best on one, worst on another). Any single-seed claim
+         about it is noise. This is precisely the trap decomposition-ensemble
+         papers fall into when they report one station and one split.
+
+       ROBUST -- CEEMDAN spreads the FLOOD process over MORE modes than plain
+         EMD (top-2 share ~58% -> ~43%, same direction in all 3 series).
+         Not a bug: injected noise creates extra extrema, which SUBDIVIDES an
+         impulsive event into more bands. Noise-assisted averaging is designed
+         to fix mixing caused by scale AMBIGUITY. A flood spike is not
+         ambiguous -- it is genuinely broadband. No linear decomposition can
+         put a 3-day pulse into a single octave.
+
+       ROBUST -- amplitude swing stays 4-5x for ALL THREE methods. None of
+         them yields amplitude-stationary high-frequency modes on this data.
+
+  (4) IS THE DYADIC FILTER BANK RESTORED?  period ratio between IMFs
+      (a clean dyadic bank gives ~2.0 everywhere; mode mixing breaks it)
+
+      EMD       ratios: 2.17 2.09 1.91 1.98 2.21 2.18 2.20
+                geometric mean 2.105   spread(sd) 0.108
+      EEMD      ratios: 2.35 2.21 2.14 1.89 2.44 2.57 1.17 1.50
+                geometric mean 1.975   spread(sd) 0.455
+      CEEMDAN   ratios: 1.55 1.26 2.06 2.00 1.95 2.95 2.50 1.33
+                geometric mean 1.877   spread(sd) 0.540
+
+  (5) CEEMDAN IMFs vs GROUND TRUTH -- what each channel actually is
+
+              period(d)      noise      flood   seasonal   baseflow
+      --------------------------------------------------------------------
+      IMF1          3.2      0.150      0.011     -0.075     -0.044   <- mostly noise
+      IMF2          4.9      0.042      0.554     -0.010     -0.004   <- mostly flood
+      IMF3          6.2      0.053      0.528     -0.016     -0.006   <- mostly flood
+      IMF4         12.7      0.028      0.515     -0.025     -0.018   <- mostly flood
+      IMF5         25.4      0.044      0.442     -0.024      0.009   <- mostly flood
+      IMF6         49.5      0.042      0.306     -0.034     -0.008   <- mostly flood
+      IMF7        146.1      0.031      0.265      0.390     -0.126   <- mostly seasonal
+      IMF8        365.2      0.026      0.240      0.825     -0.127   <- mostly seasonal
+      IMF9        487.0      0.007      0.135      0.484      0.133   <- mostly seasonal
+      res                   -0.020      0.094      0.005      0.859
+      --------------------------------------------------------------------
+
+
+==============================================================================
+          D.  END EFFECTS AND NON-CAUSALITY -- THE LEAKAGE MECHANISM          
+==============================================================================
+
+  Sifting needs splines through the extrema. Near t=0 and t=N-1 there are no
+  extrema beyond the edge, so the envelopes must be EXTRAPOLATED. The result
+  is distorted at both ends -- and for forecasting, the LAST sample is the
+  one your prediction depends on most.
+
+  Worse: EMD is not shift-invariant. Append one new observation and the
+  PAST IMF values CHANGE. Let's measure that directly.
+
+  EXPERIMENT: fix calendar day t0 = 1261. Decompose q[0:L] for growing L,
+  each time reading the IMF1 value AT THE SAME DAY t0. If EMD were causal
+  and stable, all these numbers would be IDENTICAL.
+
+   L (days used)  extra future days    IMF1[t0]    IMF2[t0]    IMF3[t0]
+  --------------------------------------------------------------------------
+            1262                  0      1.4817      0.4099     10.6646
+            1263                  1      1.2096      0.1046     10.8347
+            1266                  4      0.9882     -0.7457      3.3616
+            1276                 14      3.3624     -1.6948      1.5572
+            1311                 49      3.4737     -1.7479      1.6123
+            1381                119      3.4737     -1.7592      1.6194
+            1461                199      3.4737     -1.7592      1.6059
+  --------------------------------------------------------------------------
+
+  Look at the first row (L = t0+1: t0 IS the last sample, the honest
+  real-time case) versus the last row (the full record, i.e. what you get
+  when you decompose everything up front):
+
+      IMF1[t0]  real-time  +1.4817   vs   full-record  +3.4737
+      IMF2[t0]  real-time  +0.4099   vs   full-record  -1.7592
+      IMF3[t0]  real-time +10.6646   vs   full-record  +1.6059
+
+  These are DIFFERENT NUMBERS FOR THE SAME DAY. The "full-record" value is
+  only knowable AFTER the future has happened.
+
+  HOW BIG IS THE REVISION, on average?  (over 60 anchor days)
+  'real-time' IMF value (t is the last sample) vs 'revised' value
+  (t sits inside the full record).
+
+           mean |revision|  mean |value|   median   corr(real-time, revised)
+                                            ratio                           
+  --------------------------------------------------------------------------
+  IMF1             22.3331        9.1093     125%                      0.392
+  IMF2             31.5623        9.3229     284%                      0.209
+  IMF3             34.4120        7.5451     404%                     -0.010
+  --------------------------------------------------------------------------
+
+  Read the LAST column, it is the least gameable: the correlation between the
+  real-time IMF value and the revised (future-informed) IMF value for the SAME
+  days. If decomposition were causal this would be 1.000. Anything near zero
+  means the real-time feature and the leaky feature are essentially DIFFERENT
+  VARIABLES -- a model trained on one has not been trained for the other.
+
+  The median-ratio column guards against a small-denominator artifact: it is
+  the typical per-day |revision| / |value|, not a ratio of means.
+
+  WHY: the envelope must be EXTRAPOLATED past the last extremum.
+  Last 90 days, with the two envelopes and their mean:
+
+      last local maximum at day 88 of 89
+      last local minimum at day 86 of 89
+      ==> the final 1 day(s) are pure EXTRAPOLATION,
+          i.e. invented by the spline, not supported by any extremum.
+
+  q(t), last 90 days
+      █                                                                         
+       █                                                                        
+        █                                                         █             
+        ███                   █ █                                 ███  █        
+  ████     ███████████████████ █ ██████████████████████████████████  ██ ████████
+
+  envelope mean m(t) = (upper+lower)/2  <- subtracted by sifting
+      ███                                                                       
+     █   ██                                                        █            
+    █      █                  ███                                 █ ███         
+  ██        ██████████████████   █████████████████████████████████     █████████
+
+  The envelope mean over the unsupported tail is what gets subtracted to
+  form IMF1 there. Its value at the forecast origin is an artifact.
+
+  ==> This is why the causal protocol costs you accuracy: you must accept
+      this artifact at EVERY forecast origin. And it is why the leaky
+      protocol looks so good: it quietly replaces the artifact with the
+      true, future-informed value.
+
+
+==============================================================================
+          E.  WHAT THIS MEANS FOR DMEL -- BASED ON THE NUMBERS ABOVE          
+==============================================================================
+
+  1. CEEMDAN CHOICE IS JUSTIFIED, BUT FOR EXACTLY ONE REASON: EXACTNESS.
+     Measured: EEMD left a ~21% reconstruction error even with its residuals
+     averaged in properly, while EMD and CEEMDAN were exact to round-off.
+     Verified again on the paper's own delta-function test (Section 0).
+     DMEL SUMS its two channel forecasts (Eq.14), so exactness is not
+     cosmetic -- under EEMD there would be an irreducible error floor beneath
+     every prediction. Good call by the authors.
+     Also measured: EEMD produced 3 DIFFERENT mode counts over 100 runs, so
+     its "IMF5" averages non-comparable modes. CEEMDAN is deterministic.
+
+  2. CEEMDAN DID *NOT* CURE MODE MIXING FOR FLOOD PULSES -- IT MADE IT WORSE.
+     Replicated over 3 independent series (Section C-3b), top-2 energy share
+     of the flood process:   EMD 57.6%   EEMD 54.6%   CEEMDAN 43.3%
+     Same direction every time. And the amplitude swing of the HF modes stayed
+     at 4-5x for ALL THREE methods -- none produced amplitude-stationary
+     high-frequency modes.
+
+     WHY: noise-assisted averaging fixes mixing caused by scale AMBIGUITY.
+     A flood spike is not ambiguous; it is genuinely BROADBAND. A 3-day pulse
+     occupies many octaves by definition, so no linear decomposition can place
+     it in one band -- and injecting noise adds extrema, which subdivides the
+     event into even more bands.
+
+     ==> This corroborates DMEL's own stated Limitation (1): "challenging to
+         fully eliminate the impact of stochastic volatility, especially when
+         dealing with sudden changes." Our measurement shows the MECHANISM:
+         the preprocessing never isolated the storm response at all. The
+         Informer is handed 4-5 channels each holding a partial view of the
+         same floods -- exactly the redundancy MRS was meant to remove.
+
+  3. A METHODOLOGICAL WARNING FROM OUR OWN MISTAKE.
+     On ONE seed, CEEMDAN looked clearly best on seasonal concentration
+     (78.1% -> 88.6%). Across 3 seeds that ranking FLIPPED SIGN. Had we
+     reported the single run -- which is the normal practice in this
+     literature, and what DMEL does with 2 stations and 1 split -- we would
+     have published a confident conclusion that replication destroys.
+     DMEL repeats its MODEL TRAINING 10 times (good, and they report Wilcoxon
+     tests), but the DECOMPOSITION and the SPLIT are fixed throughout. The
+     variance that matters most is therefore never sampled.
+
+  4. THE 9-IMF RESULT IS EXPECTED, NOT A FINDING. log2(1461)=10.5. Any dyadic
+     bank on 4 years of daily data yields ~9-10 modes. DMEL got 9 at BOTH
+     stations -- consistent with theory, but not evidence of anything.
+
+  5. MRS's SAMPLE ENTROPY IS LARGELY REDUNDANT WITH IMF INDEX.
+     Period ratios came out ~2.0 per step, and complexity falls monotonically
+     with index. DMEL's own Table 2 shows exactly that monotone decrease.
+     Splitting by INDEX would likely do the same work as splitting by entropy.
+     The paper never tests that baseline.
+
+  6. THE REAL RISK IS THE LEAKAGE MEASURED IN SECTION D -- the strongest
+     quantitative finding here:
+
+         corr(real-time IMF, future-informed IMF) at the SAME timesteps:
+             IMF1  0.392      IMF2  0.209      IMF3  -0.010
+         typical per-day |revision| / |value| (median):
+             IMF1  125%       IMF2  284%       IMF3  404%
+
+     Were decomposition causal, those correlations would be 1.000. They are
+     not: the real-time feature and the leaky feature are effectively
+     DIFFERENT VARIABLES. And the effect is WORST in the high-frequency modes
+     -- precisely the ones DMEL routes to the Informer.
+
+     DMEL sections 3.1/4.1 describe decomposing the whole 2002-2005 record and
+     THEN splitting 7:1.5:1.5. If that is what was done, every test-set RIMF
+     value was built from splines through FUTURE extrema.
+
+     This does NOT cancel out by giving the baselines the same preprocessing
+     (which the paper does, to its credit). It inflates everyone, and inflates
+     most whatever leans hardest on the high-frequency channels -- which is
+     the DMEL architecture by design.
+
+  7. THE DECISIVE EXPERIMENT THE PAPER OMITS, in three lines:
+
+         A_leaky  : CEEMDAN(full series) -> split -> train -> test
+         B_causal : CEEMDAN(train only) -> fit; then at each test origin t,
+                    re-run CEEMDAN on q[0..t] and predict t+1..t+h
+         report   : KGE(A) - KGE(B)  at 1/3/5/7 steps
+
+     Small gap -> the architecture is genuinely good and the claims stand.
+     Large gap -> most of the +22%..+212% was look-ahead bias.
+     Either way it is the single most informative number that could be added,
+     and it costs one afternoon of compute.
+
+  8. TWO MORE CHEAP, MISSING BASELINES.
+     (a) NAIVE PERSISTENCE  yhat(t+h) = q(t). On daily runoff with a 7-day
+         window this is a serious competitor at h=1, and its absence from
+         Tables 4/6 is a real gap.
+     (b) ICEEMDAN instead of CEEMDAN -- designed to remove exactly the
+         residual noise and spurious early modes that our IMF1 shows
+         (correlation with the known noise only ~0.15, amplitude swing 4.7x).
+
+==============================================================================
+                                    done.                                     
+==============================================================================

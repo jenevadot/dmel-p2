@@ -1,0 +1,117 @@
+{
+  "history_hours": 336,
+  "forecast_hours": 48,
+  "interval_hours": 1,
+  "target": "specific_discharge",
+  "target_units": "mm/h",
+  "target_units_evidence": "nombre de la variable original (sin conversion aplicada)",
+  "target_channel": 11,
+  "axis_order": [
+    "sample",
+    "time",
+    "channel"
+  ],
+  "dtype": "float32",
+  "channels": [
+    {
+      "index": 0,
+      "name": "convective_fraction",
+      "description": "Fraccion convectiva",
+      "units_declared_in_source": null
+    },
+    {
+      "index": 1,
+      "name": "longwave_radiation",
+      "description": "Radiacion de onda larga",
+      "units_declared_in_source": null
+    },
+    {
+      "index": 2,
+      "name": "potential_energy",
+      "description": "Energia potencial",
+      "units_declared_in_source": null
+    },
+    {
+      "index": 3,
+      "name": "potential_evaporation",
+      "description": "Evaporacion potencial",
+      "units_declared_in_source": null
+    },
+    {
+      "index": 4,
+      "name": "pressure",
+      "description": "Presion",
+      "units_declared_in_source": null
+    },
+    {
+      "index": 5,
+      "name": "shortwave_radiation",
+      "description": "Radiacion de onda corta",
+      "units_declared_in_source": null
+    },
+    {
+      "index": 6,
+      "name": "specific_humidity",
+      "description": "Humedad especifica",
+      "units_declared_in_source": null
+    },
+    {
+      "index": 7,
+      "name": "temperature",
+      "description": "Temperatura",
+      "units_declared_in_source": null
+    },
+    {
+      "index": 8,
+      "name": "total_precipitation",
+      "description": "Precipitacion total",
+      "units_declared_in_source": null
+    },
+    {
+      "index": 9,
+      "name": "wind_u",
+      "description": "Componente u del viento",
+      "units_declared_in_source": null
+    },
+    {
+      "index": 10,
+      "name": "wind_v",
+      "description": "Componente v del viento",
+      "units_declared_in_source": null
+    },
+    {
+      "index": 11,
+      "name": "specific_discharge",
+      "description": "Caudal especifico observado",
+      "units_declared_in_source": null
+    }
+  ],
+  "y_aux_channels": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "y_aux_role": "future_supervision_only_not_inference_inputs",
+  "id_rule": "zero_based_row_index_within_file",
+  "split_codes": {
+    "0": "train",
+    "1": "validation"
+  },
+  "basin_id_rule": "anonymous_consistent_across_splits",
+  "samples": {
+    "train": 254000,
+    "validation": 18142,
+    "test": 27983
+  },
+  "normalization_applied": false,
+  "imputation_applied": false,
+  "source_identifiers_removed": true
+}

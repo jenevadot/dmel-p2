@@ -1,0 +1,14 @@
+# Core ML
+torch>=2.1.0
+numpy>=1.26.0
+scipy>=1.11.0
+
+# Data
+h5py>=3.9.0
+
+# Utilities
+tqdm>=4.66.0
+pandas>=2.1.0
+
+# Optional: Wilcoxon test (graceful fallback if absent)
+# scipy already listed above — provides stats.wilcoxon

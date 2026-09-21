@@ -1,0 +1,19 @@
+{
+  "name": "baseline_climatology",
+  "is_baseline": true,
+  "selection_split": "none",
+  "report_split": "dev",
+  "dev_median_nse": 0.15462277794817514,
+  "dev_mean_nse": -0.3673467236693454,
+  "dev_median_kge": 0.4301017322139232,
+  "dev_pct_nse_05": 25.196850393700785,
+  "dev_pct_nse_07": 14.566929133858267,
+  "horizon_nse": {
+    "h1_12": 0.26775110251692563,
+    "h13_24": 0.27169674317405856,
+    "h25_36": 0.12102720046739818,
+    "h37_48": 0.1290086036932987
+  },
+  "n_params": 0,
+  "total_minutes": 0.0
+}

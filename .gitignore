@@ -1,0 +1,25 @@
+# ── Data: never commit. 5.1 GB, and both machines fetch it independently.
+data/*.h5
+# Regenerated deterministically from the seed (src/splits.py)
+data/split_*.npz
+# CEEMDAN cache: ~0.6 GB, rebuilt by ./run_ceemdan.sh
+data/rimf_*.h5
+
+# ── Per-experiment artefacts that are big or machine-local ──────────────
+# 36 MB each. Share deliberately, not via git — see WORKFLOW.md.
+experiments/**/best_model.pt
+# Regenerated from the split + seed
+experiments/**/norm.npz
+# Full stdout; history.csv already carries the numbers
+experiments/**/log.txt
+experiments/*.log
+
+# ── Reference papers: large, static, not ours to redistribute ───────────
+*.pdf
+dmel.txt
+
+# ── Environment ────────────────────────────────────────────────────────
+.venv/
+__pycache__/
+*.pyc
+.DS_Store

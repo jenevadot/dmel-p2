@@ -1,0 +1,2 @@
+# Metrics JSON is machine-generated; avoid noisy conflict markers on merge.
+experiments/**/metrics_*.json -diff

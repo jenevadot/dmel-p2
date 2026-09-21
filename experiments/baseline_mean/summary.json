@@ -1,0 +1,19 @@
+{
+  "name": "baseline_mean",
+  "is_baseline": true,
+  "selection_split": "none",
+  "report_split": "dev",
+  "dev_median_nse": -0.007087636241719042,
+  "dev_mean_nse": -1.00568845966064,
+  "dev_median_kge": -0.0081255932990687,
+  "dev_pct_nse_05": 0.0,
+  "dev_pct_nse_07": 0.0,
+  "horizon_nse": {
+    "h1_12": -0.009697942058492837,
+    "h13_24": -0.010153827472585863,
+    "h25_36": -0.009496348459066772,
+    "h37_48": -0.010128624291442567
+  },
+  "n_params": 0,
+  "total_minutes": 0.0
+}

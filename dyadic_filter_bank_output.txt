@@ -1,0 +1,258 @@
+
+==============================================================================
+                          1.  WHAT IS A FILTER BANK?                          
+==============================================================================
+
+  A FILTER BANK is just a set of band-pass filters that together split one
+  signal into several frequency bands, so that summing the bands gives the
+  signal back.
+
+      q(t) ──┬──► [ filter 1 ]──► band 1  (fast wiggles)
+             ├──► [ filter 2 ]──► band 2
+             ├──► [ filter 3 ]──► band 3
+             └──► [ filter k ]──► band k  (slow drift)
+                                  Σ = q(t)
+
+  The only question is: WHERE DO YOU PUT THE BAND EDGES?
+
+  (a) UNIFORM / LINEAR filter bank   — what the FFT and the STFT give you
+      every band has the SAME width  (Δf constant)
+
+      |-------|-------|-------|-------|-------|-------|-------|-------|
+         b1      b2      b3      b4      b5      b6      b7      b8   
+      0                             frequency                          Nyqui
+
+      Problem: band 1 covers 0-6% of the spectrum, and so does band 8.
+      But in real signals the INTERESTING slow structure is all crammed
+      into band 1, while band 8 is mostly noise. Wasteful.
+
+  (b) DYADIC / OCTAVE-BAND filter bank   — what wavelets and EMD give you
+      each band is HALF the frequency of the previous one
+      (dyad = two; 'dyadic' = successive halving, powers of 2)
+
+      high freq ◄────────────────────────────────────────► low freq
+      ██████████████████████████████████  band 1:  f ∈ [0.5000, 1.0000] × Nyquist
+      █████████████████  band 2:  f ∈ [0.2500, 0.5000] × Nyquist
+      ████████  band 3:  f ∈ [0.1250, 0.2500] × Nyquist
+      ████  band 4:  f ∈ [0.0625, 0.1250] × Nyquist
+      ██  band 5:  f ∈ [0.0312, 0.0625] × Nyquist
+      █  band 6:  f ∈ [0.0156, 0.0312] × Nyquist
+      █  band 7:  f ∈ [0.0078, 0.0156] × Nyquist
+
+      Each band is one OCTAVE. Band i covers  [fs/2^(i+1), fs/2^i].
+      In the TIME domain that means the characteristic PERIOD DOUBLES
+      every band:   2, 4, 8, 16, 32, 64, 128 ... samples.
+
+
+==============================================================================
+               2.  WHY 'DYADIC'? THE ITERATED TWO-CHANNEL SPLIT               
+==============================================================================
+
+  You get octave bands by repeatedly splitting only the LOW half in two.
+  (This is Mallat's algorithme à trous / the wavelet cascade.)
+
+     q ──►┬─[HP]──► detail 1          period ~2      ← finest
+          │
+          └─[LP]──►┬─[HP]──► detail 2  period ~4
+                   │
+                   └─[LP]──►┬─[HP]──► detail 3  period ~8
+                            │
+                            └─[LP]──►┬─[HP]──► detail 4  period ~16
+                                     │
+                                     └─[LP]──► ... ──► approximation (TREND)
+
+  Every stage halves the remaining bandwidth, so:
+      • band centre frequencies are  f/2, f/4, f/8, f/16 ...
+      • band periods are             2,   4,   8,   16   ...
+      • you can only do this log2(N) times before you run out of samples
+        ⇒ THE NUMBER OF BANDS IS ~log2(N)
+
+  Key property: CONSTANT-Q.
+      Q = centre frequency / bandwidth = constant for every band.
+      Absolute bandwidth is wide at high f, narrow at low f.
+
+      ⇒ good TIME resolution for fast events (a flood spike)
+        good FREQUENCY resolution for slow cycles (the annual cycle)
+      This is the right trade-off for natural signals, and it is why
+      music uses octaves, audio uses Mel/Bark scales, and 1/f noise
+      looks self-similar on a log axis.
+
+
+==============================================================================
+              3.  EMD IS A DYADIC FILTER BANK — LIVE MEASUREMENT              
+==============================================================================
+
+  Nobody designed EMD to be dyadic. It EMERGES from sifting.
+  The classic test (Flandrin, Rilling & Gonçalves 2004; Wu & Huang 2004):
+  run EMD on pure WHITE NOISE — which has no structure at all, equal power
+  at every frequency — and look at what comes out.
+
+  If EMD were arbitrary, the IMFs would be arbitrary. Let's see.
+
+  Input: 2048 samples of Gaussian white noise
+  white noise q(t)
+   █████████ ███ █ █ █████████████████  ██ ██████████ ███████  ███████████████ █
+  ██████████████████████████████████████████████████████████████████████████████
+  ██████████████████████████████████████████████████████████████████████████████
+   ███ ██ ███████ ████   █  ██ █ ██ ███ ███   ██ █ █ ██   ██████ ██████ █ █ ███ 
+
+  Running from-scratch EMD (cubic-spline sifting)... done → 9 IMFs + residual
+
+  --------------------------------------------------------------------------
+  IMF    mean period   ratio to  #extrema   variance  var ratio
+           (samples)   previous                                
+  --------------------------------------------------------------------------
+  1             2.91          —      1415     0.6528          —
+  2             6.21      2.13x       662     0.2290      2.85x
+  3            12.88      2.08x       319     0.1124      2.04x
+  4            24.98      1.94x       166     0.0488      2.30x
+  5            50.57      2.02x        81     0.0392      1.24x
+  6            99.90      1.98x        41     0.0185      2.12x
+  7           195.05      1.95x        22     0.0109      1.70x
+  8           455.11      2.33x         9     0.0043      2.52x
+  9          1365.33      3.00x         3     0.0018      2.45x
+  --------------------------------------------------------------------------
+  geometric mean of period ratios = 2.157      (dyadic ⇒ ≈ 2.0)
+
+  MEAN PERIOD OF EACH IMF, plotted on a log2 axis:
+  (if EMD is dyadic, these land at EQUAL SPACING)
+
+  IMF1  T=    2.9  |◆                                                   |
+  IMF2  T=    6.2  |      ◆                                             |
+  IMF3  T=   12.9  |            ◆                                       |
+  IMF4  T=   25.0  |                 ◆                                  |
+  IMF5  T=   50.6  |                       ◆                            |
+  IMF6  T=   99.9  |                             ◆                      |
+  IMF7  T=  195.0  |                                  ◆                 |
+  IMF8  T=  455.1  |                                         ◆          |
+  IMF9  T= 1365.3  |                                                   ◆|
+                 |log2(period) →                                      |
+
+  Equal spacing on a log2 axis == each period is a constant MULTIPLE of the
+  last == dyadic. (Deviation at the last IMFs is real: they contain only a
+  couple of cycles, so their period estimate is very noisy.)
+
+  THE IMFs THEMSELVES (first 256 samples of each, same x-scale).
+  Watch the oscillation density HALVE each time:
+
+  IMF1   (170 extrema in 256 samples, mean period ≈ 3)
+  █  █   █  █ ███     █████ ████  ██ ███    ███ █ ██ ████ ██  █  █████████  ███ 
+  ███████████████████████████████████████████████████·██████████████████████████
+   █ █    ██ ██████ █ ████  ██████ ████    ███ ██████ ██████ ███████ █████ ████ 
+
+  IMF2   (76 extrema in 256 samples, mean period ≈ 6)
+   ████ ███  ████████ █   ██       █ █     ███ ███  █ ██  █ █  █ █     █ █  █ █ 
+  ██·███·███████████████·████████████████████████████·██████·█·█·█████████·█·███
+     █ █ ████  ██ ████  ██  █     █ █ ██   ██ █ █ ████     █ ██ █ █   █ █ █  █  
+
+  IMF3   (34 extrema in 256 samples, mean period ≈ 13)
+    ███   █   ██  ██           ███        ██   ███ ██   ████   ██     ██  ███   
+  ███·██·█·██████████████████··█·██████████·██·█·█·█·█·██··██·████████████··████
+       ██       ██  █       ███     ██   █   ███ ███ ███    ███         ██  ██  
+
+  IMF4   (17 extrema in 256 samples, mean period ≈ 25)
+         ████     ███    ████                             ████      ██   ███   █
+  ······██···█···█··██··██···██·········███████████████████···███·██·██··█··█··█
+  ███████     ███    ████     ██████████                        ███   ███   ███ 
+
+  IMF5   (7 extrema in 256 samples, mean period ≈ 51)
+                                 ██████████████          ████      ██████      █
+  █████████████···············████············████████████··████████····███··███
+               ███████████████                                            ████  
+
+  IMF6   (3 extrema in 256 samples, mean period ≈ 100)
+                       ███████████████████                  ██████████████████  
+  ·············█████████·················████████····████████················███
+  █████████████                                  █████                          
+
+  IMF7   (1 extrema in 256 samples, mean period ≈ 195)
+  ████████████████████████████████████████████████                              
+  ···············································██████████████·················
+                                                               █████████████████
+
+  residual (monotone trend)
+  ██████████████████████████                                                    
+  ·························███████████████······································
+                                         ███████████████████████████████████████
+
+  ⇒ EMD took a signal with NO structure and produced a clean
+     octave-band decomposition. The dyadic behaviour is a property of the
+     SIFTING ALGORITHM, not of the data.
+
+
+==============================================================================
+               4.  WHY SIFTING PRODUCES OCTAVES (the intuition)               
+==============================================================================
+
+  Sifting builds envelopes by interpolating BETWEEN CONSECUTIVE EXTREMA.
+  So IMF1 can only capture oscillations at the finest extrema spacing —
+  the fastest thing present, period ≈ 2 samples.
+
+  Now subtract IMF1. Every OTHER extremum belonged to IMF1, so removing it
+  roughly HALVES the density of extrema in the residue:
+
+     original   ▲ ▼ ▲ ▼ ▲ ▼ ▲ ▼ ▲ ▼ ▲ ▼ ▲ ▼ ▲ ▼      spacing 2
+     - IMF1
+     residue    ▲   ▼   ▲   ▼   ▲   ▼   ▲   ▼        spacing 4
+     - IMF2
+     residue    ▲       ▼       ▲       ▼            spacing 8
+     - IMF3
+     residue    ▲               ▼                    spacing 16
+                          ...
+     residue    ▲                                    monotone → STOP
+
+  Extrema spacing doubles ⇒ period doubles ⇒ octave bands ⇒ DYADIC.
+  And since you halve the extrema count each round, you run out after
+  about log2(N) rounds. That is the whole mechanism.
+
+
+==============================================================================
+           5.  CONSEQUENCES FOR DMEL (daily runoff, N ≈ 1461 days)            
+==============================================================================
+
+  log2(1461) = 10.5   →  expect ~10 components.
+  DMEL reports 9 IMFs + residual at BOTH stations.  ✓ consistent.
+
+  Predicted period band of each IMF (≈ 2^i days) and what it physically is:
+
+  IMF  period      physical meaning                         SE       route
+  --------------------------------------------------------------------------
+  1    2–4 d       measurement noise, single storm response 0.1885   HF → Informer
+  2    4–8 d       individual flood events                  0.2226   HF → Informer
+  3    8–16 d      synoptic weather passages                0.1911   HF → Informer
+  4    16–32 d     multi-week wet/dry spells                0.2593   HF → Informer
+  5    32–64 d     intra-seasonal (MJO-like)                0.2167   HF → Informer
+  6    64–128 d    seasonal transition                      0.0509   LF ┐
+  7    128–256 d   semi-annual / monsoon                    0.0305   LF ├ summed
+  8    256–512 d   ANNUAL CYCLE                             0.0162   LF ├ → RIMF6
+  9    512–1024 d  inter-annual                             0.0014   LF ┘  → LSTM
+  --------------------------------------------------------------------------
+
+  ── Three things this buys you for reading the paper ───────────────────────
+
+  (1) DMEL's Table 2 sample entropies DECREASE MONOTONICALLY with IMF index.
+      That is *exactly* what a dyadic filter bank predicts — longer period =
+      smoother = lower complexity. So the "Modal Recognition Strategy" is
+      largely REDISCOVERING the frequency ordering CEEMDAN already handed it
+      for free. Splitting by IMF index would likely work as well; the paper
+      never tests that baseline.
+
+  (2) The HF/LF split lands almost exactly at the SEASONAL boundary
+      (IMF5 | IMF6, i.e. ~64 days). So "high frequency" = weather, and
+      "low frequency" = climate/seasonality + baseflow. That is a physically
+      sensible cut — arguably the paper's most defensible design choice, even
+      though it is justified only statistically (entropy) and never
+      hydrologically.
+
+  (3) ⚠️ The slowest IMFs are STATISTICALLY FRAGILE. IMF9 has a period of
+      ~512–1024 days inside a 1461-day record: that is ~1.5–3 cycles. You
+      cannot estimate a cycle from 2 cycles. With only 4 years of data the
+      annual and inter-annual IMFs are nearly unidentifiable, and they are
+      precisely the ones routed to the LSTM — which carries the LARGEST mean
+      |SHAP| in the paper's own interpretability analysis (§5.4).
+      So the dominant predictor is the least well-estimated component.
+      A 20–30 year record would make this far more credible.
+
+==============================================================================
+                                    done.                                     
+==============================================================================
