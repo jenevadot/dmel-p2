@@ -54,7 +54,7 @@ metrics, and re-running a config from `config.json` is deterministic.
 
 ```bash
 # 1. Repo
-git clone <your-remote> paper2 && cd paper2
+git clone git@github.com:jenevadot/dmel-p2.git paper2 && cd paper2
 
 # 2. Data — NOT in git. Copy from machine A or re-download.
 #    5.1 GB total; scp over LAN is usually fastest.
@@ -64,11 +64,21 @@ scp machineA:~/paper2/data/test.h5  data/
 scp machineA:~/paper2/data/metadata.json data/
 
 # 3. Environment. Same uv flow, CUDA wheel instead of CPU.
+#    Install torch from the CUDA index FIRST so the lockfile's CPU/MPS
+#    torch==2.14.0 does not get pulled in, then pin everything else.
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python torch --index-url \
     https://download.pytorch.org/whl/cu121
-uv pip install --python .venv/bin/python -r requirements.txt matplotlib
+uv pip install --python .venv/bin/python matplotlib \
+    -r <(grep -v '^torch==' requirements-lock-machineA.txt)
+
+# 3b. Confirm the majors match Machine A — differing numpy/pandas majors
+#     make results incomparable.
+.venv/bin/python -c "import numpy,pandas,scipy,h5py; \
+print('numpy',numpy.__version__,'pandas',pandas.__version__, \
+'scipy',scipy.__version__,'h5py',h5py.__version__)"
+# Machine A: numpy 2.4.6  pandas 3.0.6  scipy 1.17.1  h5py 3.16.0
 
 # 4. Verify — must print cuda True
 .venv/bin/python -c "import torch; print('cuda', torch.cuda.is_available())"
@@ -107,17 +117,31 @@ without scaling lr confounds the two.
 
 The split follows the hardware, not preference.
 
-**Machine A (M4) — CEEMDAN, because it is a 12-process CPU job:**
+> **Status 2026-09-21: CEEMDAN on Machine A failed and is 0.094% done.**
+> The 12-process run was launched while training held the machine. Workers died
+> with `BrokenPipeError` on `send_bytes` plus 6 leaked semaphores — the pool
+> could not return results under memory pressure (26 GB unified, ~5.9 GB already
+> swapped). `ceemdan_train.log` opens with `272,142 / 272,142 rows remaining`
+> and never recovers.
+>
+> Resume worked as designed: **256 of 272,142 windows** are complete and flagged
+> `done`. Nothing is corrupt — but ~17 h of work remains, it is not 17 h spent.
+>
+> Do not co-schedule CEEMDAN with training again. Either stop the queue first,
+> or run it on Machine B (see revised division below).
+
+**Machine A (M4) — training, which it is already mid-queue on:**
 ```bash
-pkill -f run_queue.sh          # free the cores first
-./run_ceemdan.sh 12            # ~17 h, resumable
+./run_queue.sh exp_005__aux_task exp_006__basin_emb exp_009__huber
 ```
 
-**Machine B (CUDA) — training, because it is ~3-5× faster:**
+**Machine B (Ryzen 9) — CEEMDAN, which is a pure CPU job it wins at:**
 ```bash
-./run_queue.sh exp_005__aux_task exp_006__basin_emb exp_009__huber \
-               exp_011__nse_loss exp_003__discharge_only
+./run_ceemdan.sh 12            # ~17 h, resumable, needs the box to itself
 ```
+Then `scp` the ~600 MB `data/rimf_*.h5` back to A rather than paying the 17 h
+twice. If you must run it on A, stop the queue first and start at `8` procs —
+12 is what broke it.
 
 Claim experiments explicitly so neither machine repeats work. `run()` already
 skips any experiment whose `metrics_dev.json` exists, so a `git pull` before
@@ -133,12 +157,12 @@ git pull                        # see what the other machine finished
 
 | Machine | Experiments | Why |
 |---|---|---|
-| B (CUDA) | `exp_001__baseline`, `exp_005__aux_task`, `exp_006__basin_emb`, `exp_009__huber`, `exp_011__nse_loss` | the high-value decisions; fastest machine |
-| B (CUDA) | `exp_003__discharge_only`, `exp_002__global_norm`, `exp_013__lr_5e4` | second wave |
-| A (M4) | `./run_ceemdan.sh` then `exp_020__dmel` and the DMEL ablations | CEEMDAN cache lives here |
+| A (M4) | `exp_001__baseline` (running, ep 9/40), then `exp_005__aux_task`, `exp_006__basin_emb`, `exp_009__huber` | already mid-queue; do not restart what is in flight |
+| B (CUDA) | `exp_011__nse_loss`, `exp_003__discharge_only`, `exp_002__global_norm`, `exp_013__lr_5e4` | fastest at training once its env is built |
+| B (CPU) | `./run_ceemdan.sh` first — it blocks every DMEL ablation | Ryzen 9 is faster, and A cannot run it alongside training |
 
-Once the cache exists on A, either `scp` `data/rimf_*.h5` to B (~600 MB) or
-re-run `./run_ceemdan.sh` there — the Ryzen 9 will be faster at it.
+Once the cache exists on B, `scp` `data/rimf_*.h5` to A (~600 MB) so the DMEL
+ablations (`exp_020__dmel` …) can run on either machine.
 
 ---
 
