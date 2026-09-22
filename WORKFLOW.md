@@ -117,31 +117,53 @@ without scaling lr confounds the two.
 
 The split follows the hardware, not preference.
 
-> **Status 2026-09-21: CEEMDAN on Machine A failed and is 0.094% done.**
-> The 12-process run was launched while training held the machine. Workers died
-> with `BrokenPipeError` on `send_bytes` plus 6 leaked semaphores — the pool
-> could not return results under memory pressure (26 GB unified, ~5.9 GB already
-> swapped). `ceemdan_train.log` opens with `272,142 / 272,142 rows remaining`
-> and never recovers.
+> **Status 2026-09-22: CEEMDAN COMPLETE and verified on Machine A.**
+> Both caches are 100% built and validated:
 >
-> Resume worked as designed: **256 of 272,142 windows** are complete and flagged
-> `done`. Nothing is corrupt — but ~17 h of work remains, it is not 17 h spent.
+> | cache | shape | done | size |
+> |---|---|---|---|
+> | `rimf_train_110b9c26af82.h5` | `(272142, 3, 336)` | 272,142/272,142 | 554 MB |
+> | `rimf_test_110b9c26af82.h5` | `(27983, 3, 336)` | 27,983/27,983 | 57 MB |
 >
-> Do not co-schedule CEEMDAN with training again. Either stop the queue first,
-> or run it on Machine B (see revised division below).
+> Train took 1255 min (20.9 h) at 3.6 win/s, 12 procs, **0 failed blocks**.
+>
+> Checks that passed, and the one that matters most first:
+> * **Row count equals the source**, 272,142 — this is the check that catches
+>   the truncated-cache trap (`--limit` sizes datasets on creation, so a
+>   partial cache reports `done 100%` forever). Always verify the SHAPE, not
+>   the done fraction.
+> * Superposition `sum(RIMF_1..K) == q` on 400 independent random windows:
+>   max abs err **7.65e-03 mm/h**, median 2.56e-06. For windows with
+>   `|q|max > 1e-3` (367 of 400) max REL err is 4.75e-04. The few windows
+>   showing rel err up to 0.28 are near-zero-flow (|q|max ~ 2e-07), where
+>   float16 storage granularity dominates a signal that is already numerically
+>   zero — absolute error there is 6e-08 mm/h and irrelevant to the loss.
+> * `n_imf` distribution 5-9, mode 7 (41.8%) / 8 (41.2%) — matches the
+>   documented CEEMDAN expectation and the paper's 9.
+> * Degenerate codes: 97.57% normal, 2.43% constant. Constant windows
+>   reconstruct **exactly** (abs err 0.0).
+> * `build_splits(use_ceemdan=True)` loads real batches: `rimf (b,3,336)`,
+>   `se_rimf (b,3)`, `se_original (b,)`.
+>
+> **Only 5 of 31 experiments need this cache** (`exp_020`-`exp_024`).
+> `use_ceemdan` defaults False, so the other 26 train from `train.h5` alone —
+> Machine B is not blocked on the transfer.
 
-**Machine A (M4) — training, which it is already mid-queue on:**
+**Machine A (M4) — the DMEL ablations, since the cache lives here:**
 ```bash
-./run_queue.sh exp_005__aux_task exp_006__basin_emb exp_009__huber
+./run_queue.sh exp_020__dmel exp_021__dmel_mlp_combiner \
+               exp_023__dmel_se_threshold exp_024__dmel_univariate
 ```
 
-**Machine B (Ryzen 9) — CEEMDAN, which is a pure CPU job it wins at:**
+**Machine B (Ryzen 9) — the 26 experiments that need no cache:**
 ```bash
-./run_ceemdan.sh 12            # ~17 h, resumable, needs the box to itself
+./run_queue.sh exp_038__no_clip exp_011__nse_loss exp_009__huber \
+               exp_005__aux_task exp_006__basin_emb
 ```
-Then `scp` the ~600 MB `data/rimf_*.h5` back to A rather than paying the 17 h
-twice. If you must run it on A, stop the queue first and start at `8` procs —
-12 is what broke it.
+`exp_038__no_clip` first: `exp_001` measured `mean_grad_norm 2.286` against
+`clip_grad 1.0`, so the clipper fires on essentially every step and the
+effective lr is below the configured 1e-4. If that is throttling training it
+confounds every other result, so settle it before running twenty more.
 
 Claim experiments explicitly so neither machine repeats work. `run()` already
 skips any experiment whose `metrics_dev.json` exists, so a `git pull` before
@@ -157,12 +179,31 @@ git pull                        # see what the other machine finished
 
 | Machine | Experiments | Why |
 |---|---|---|
-| A (M4) | `exp_001__baseline` (running, ep 9/40), then `exp_005__aux_task`, `exp_006__basin_emb`, `exp_009__huber` | already mid-queue; do not restart what is in flight |
-| B (CUDA) | `exp_011__nse_loss`, `exp_003__discharge_only`, `exp_002__global_norm`, `exp_013__lr_5e4` | fastest at training once its env is built |
-| B (CPU) | `./run_ceemdan.sh` first — it blocks every DMEL ablation | Ryzen 9 is faster, and A cannot run it alongside training |
+| A (M4) | `exp_020__dmel` + the 4 DMEL ablations | the RIMF cache lives here; these are the paper's contribution |
+| B (CUDA) | `exp_038__no_clip`, `exp_011__nse_loss`, `exp_009__huber`, `exp_005__aux_task`, `exp_006__basin_emb` | no cache needed; fastest machine takes the high-value decisions |
+| B (CUDA) | `exp_002`, `exp_003`, `exp_013`, then the `medium` tier | second wave, still cache-free |
 
-Once the cache exists on B, `scp` `data/rimf_*.h5` to A (~600 MB) so the DMEL
-ablations (`exp_020__dmel` …) can run on either machine.
+**Moving the cache to B** — only needed if B is to run DMEL arms too. 611 MB
+total, so `scp` beats re-running the 20.9 h:
+
+```bash
+scp machineA:~/UTEC/ciclo5/deepLearning/paper2/data/rimf_*.h5 data/
+```
+
+The filename hash (`110b9c26af82`) is `cache_key(CEEMDAN_CFG)` over the 9
+`KEY_FIELDS` plus `ALGO_VERSION`. It is identical on both machines as long as
+neither edits `CEEMDAN_CFG` or bumps `ALGO_VERSION`, so a copied cache is found
+automatically — no path config. If B ever computes a different hash, the configs
+have diverged and the cache would be silently ignored rather than misused.
+
+After copying, verify on B before trusting it:
+
+```bash
+.venv/bin/python -c "
+import h5py; f=h5py.File('data/rimf_train_110b9c26af82.h5','r')
+d=f['done'][:]; print(f['rimf'].shape, int(d.sum()), '/', len(d))"
+# want: (272142, 3, 336) 272142 / 272142
+```
 
 ---
 
