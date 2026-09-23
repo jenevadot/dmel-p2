@@ -1,0 +1,17 @@
+{
+  "exp": "exp_001__baseline",
+  "test_median_nse": 0.6316078091954674,
+  "test_mean_nse": 0.5373290566094483,
+  "test_median_kge": 0.6981945469490332,
+  "test_n_basins": 508,
+  "test_horizon_nse": {
+    "h1_12": 0.9189915359020233,
+    "h13_24": 0.7428523004055023,
+    "h25_36": 0.5882890224456787,
+    "h37_48": 0.46170783042907715
+  },
+  "sanval_median_nse": 0.6185767678517842,
+  "dev_median_nse": 0.6419137209028665,
+  "test_minus_sanval": 0.01303104134368327,
+  "targets_file": "test_targets.csv"
+}

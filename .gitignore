@@ -1,5 +1,9 @@
 # ── Data: never commit. 5.1 GB, and both machines fetch it independently.
 data/*.h5
+# Test ground truth, 17 MB. Ships with the dataset, so Machine B fetches it the
+# same way it fetches the h5 files. Kept out of git for the same reason: it is
+# input data, not a result.
+data/test_targets.csv
 # Regenerated deterministically from the seed (src/splits.py)
 data/split_*.npz
 # CEEMDAN cache: ~0.6 GB, rebuilt by ./run_ceemdan.sh

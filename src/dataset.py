@@ -282,6 +282,7 @@ class RunoffDataset(Dataset):
         input_channels: Optional[list] = None,
         rimf_cache=None,
         want_aux: bool = False,
+        external_y: Optional[np.ndarray] = None,
     ):
         self.h5_path    = str(h5_path)
         self.indices    = indices
@@ -291,6 +292,28 @@ class RunoffDataset(Dataset):
         self.input_channels = input_channels
         self.rimf_cache = rimf_cache
         self.want_aux   = want_aux
+
+        # external_y: targets that live OUTSIDE the h5, indexed by the same
+        # row id. Used for test.h5, whose targets ship as a separate CSV
+        # (see config.TEST_TARGETS_CSV). Shape (n_rows_in_file, 48), raw mm/h.
+        #
+        # Kept separate from has_targets rather than folded into it because
+        # the two answer different questions: has_targets asks "does f['y']
+        # exist", external_y asks "do I have labels from elsewhere". Reading
+        # f["y"] on test.h5 is a KeyError, so the __getitem__ branch must know
+        # which source to use.
+        self.external_y = external_y
+        if external_y is not None:
+            if has_targets:
+                raise ValueError(
+                    "pass either has_targets=True (read f['y']) or "
+                    "external_y=..., not both — they are two sources for "
+                    "the same key and silently disagreeing is worse than "
+                    "failing here.")
+            if external_y.shape[1] != FORECAST_HOURS:
+                raise ValueError(
+                    f"external_y must be (n, {FORECAST_HOURS}), "
+                    f"got {external_y.shape}")
 
         # File handle — opened lazily per worker process
         self._file = None
@@ -374,6 +397,19 @@ class RunoffDataset(Dataset):
                     sc = self.normalizer.std_[b, :N_AUX_CHANNELS]
                     y_aux = (y_aux - mc) / sc
                 result["y_aux"] = torch.from_numpy(y_aux)
+
+        elif self.external_y is not None:
+            # Targets from the sidecar CSV. Normalised with the SAME per-basin
+            # stats as the h5 path above, because evaluate_model inverts this
+            # exact transform (y * std + mean) to get back to mm/h. Handing it
+            # raw values here would scale the observations by std and shift
+            # them by mean a second time, quietly wrecking every NSE.
+            y = self.external_y[i].astype(np.float32)    # (48,) raw mm/h
+            if self.normalizer is not None:
+                m = self.normalizer.mean_[b, TARGET_CHANNEL]
+                s = self.normalizer.std_[b,  TARGET_CHANNEL]
+                y = (y - m) / s
+            result["y"] = torch.from_numpy(y)
 
         return result
 

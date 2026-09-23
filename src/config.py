@@ -29,6 +29,22 @@ TRAIN_H5  = DATA_DIR / "train.h5"
 TEST_H5   = DATA_DIR / "test.h5"
 META_JSON = DATA_DIR / "metadata.json"
 
+# Ground-truth targets for test.h5, shipped separately from the inputs.
+#
+# test.h5 holds only X and basin_id; this CSV supplies the 48h targets that
+# would otherwise be missing. Layout: Id,q_01..q_48 with Id == the zero-based
+# row index in test.h5 (metadata.json: id_rule), so the join is positional.
+#
+# Verified raw mm/h, NOT z-scored (metadata.json: normalization_applied=false):
+# CSV median 0.0245 vs train.h5 y median 0.0202 — same scale. Continuity check
+# against the history channel gives corr 0.996 between X[:,-1,11] and q_01,
+# median |gap| 1.05e-4 mm/h, which is what confirms the row alignment.
+#
+# TEST IS A FINAL READ-OUT, NOT A SELECTION SPLIT. Nothing in training or
+# checkpointing may read this file; 508 basins with no held-out remainder
+# means tuning against it destroys its only value.
+TEST_TARGETS_CSV = DATA_DIR / "test_targets.csv"
+
 # ─────────────────────────────────────────────────────────────
 # 1. Reproducibility seeds
 #    Set these ONCE here; call seed_everything() at start of
