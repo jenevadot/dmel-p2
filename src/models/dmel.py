@@ -298,9 +298,24 @@ def build_model(cfg: dict) -> DMEL:
 
     The cfg dict is the merged TRAIN_CFG + experiment overrides.
     This is the single entry point used by experiment.py.
+
+    c_in is DERIVED from input_channels when that is set, not read blindly
+    from cfg. The dataset subsets X to the requested channels, so a config
+    carrying input_channels=[11] with c_in=12 builds a conv expecting 12
+    channels and is handed 1 — an immediate RuntimeError ~90 s into training:
+
+        weight of size [256, 12, 3], expected input[64, 1, 338] to have
+        12 channels, but got 1 channels instead
+
+    That is what killed exp_003__discharge_only and exp_004__precip_discharge.
+    An explicit cfg["c_in"] still wins, so a deliberate override is possible.
     """
+    input_channels = cfg.get("input_channels")
+    default_c_in = (len(input_channels) if input_channels is not None
+                    else N_CHANNELS)
+
     return DMEL(
-        c_in            = cfg.get("c_in",            N_CHANNELS),
+        c_in            = cfg.get("c_in") or default_c_in,
         seq_len         = cfg.get("seq_len",          HISTORY_HOURS),
         label_len       = cfg.get("label_len",        INFORMER_CFG["label_len"]),
         pred_len        = cfg.get("pred_len",         FORECAST_HOURS),
