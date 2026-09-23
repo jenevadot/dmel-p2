@@ -304,6 +304,16 @@ Split is stratified by basin with `seed=42`. Per-basin z-score normalizer is fit
 
 Early stopping monitors **median NSE on san\_val**, patience=10 epochs.
 
+Metrics are computed **per basin first, then median across the 508** — never as
+one global pool — and again per 12-hour horizon bucket with a bucket-local mean.
+Median rather than mean because 39 of 508 basins have negative NSE and one
+reaches -1.1e+04, which drags the mean to -24.8 against a median of +0.6419.
+
+For the full metric chain, how it compares to the paper's per-step / 10-run
+protocol, and the seed-variance gap we have **not** closed, see
+**`WORKFLOW.md` → "How evaluation works, and why it differs from the paper"**.
+Open work items are in **`TASKS.md`**.
+
 ---
 
 ## Recommended Workflow

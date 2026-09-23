@@ -243,6 +243,130 @@ device being identical.
 
 ---
 
+## How evaluation works, and why it differs from the paper
+
+### The metric chain (`src/evaluate.py`)
+
+Two nested aggregations. The order is load-bearing.
+
+1. **Denormalise per basin** (`evaluate.py:476-479`). Predictions leave the model
+   in z-score space; each basin's own `mean_`/`std_` at `TARGET_CHANNEL` puts
+   them back in mm/h. Every metric below is on real discharge.
+
+2. **One NSE per basin**, over all that basin's samples flattened:
+
+       NSE_b = 1 - Σ(o_i - p_i)² / Σ(o_i - ō_b)²
+
+   The denominator uses **that basin's own mean**, so NSE = 0 means "no better
+   than predicting this basin's average".
+
+3. **Median across the 508 basins** (`aggregate`, `evaluate.py:349`) is the
+   PRIMARY ranking metric. Not the mean — see below.
+
+4. **Horizon buckets**: `{h1_12, h13_24, h25_36, h37_48}`
+   (`evaluate.py:124`). Per basin and per bucket, slice columns `[lo:hi]` and
+   recompute NSE with a **bucket-local mean** (`evaluate.py:504`), then take the
+   median across basins. The local mean matters — late-horizon observations have
+   different variance than early ones, so reusing the basin mean would misstate
+   the denominator.
+
+### Why median, not mean
+
+Measured on `exp_001__baseline` dev:
+
+| | value |
+|---|---|
+| median NSE | **+0.6419**  ← ranking metric |
+| mean NSE | **-24.84** |
+| worst basin | -1.12e+04 |
+| basins with NSE < 0 | 39 of 508 |
+| basins > 0.5 | 64.0% |
+
+One near-zero-flow basin at -11,155 drags the mean below -24 while two thirds of
+basins clear 0.5. Those are catchments where the NSE denominator is nearly zero
+— the same failure that broke the first ridge attempt (see `baselines.py`).
+Median is robust to them; mean is kept only as an outlier diagnostic.
+
+Note `pct_nse_05` / `pct_nse_07` divide by ALL basins, not the valid ones
+(`evaluate.py:343-346`) — otherwise a run that NaN'd on 200 basins would report
+percentages over the surviving 308 and look *better* for having failed.
+
+### Why buckets rather than one number
+
+Discharge is so autocorrelated that the first 12 h are nearly free:
+
+| | h1_12 | h13_24 | h25_36 | h37_48 |
+|---|---|---|---|---|
+| persistence | **0.9382** | 0.6865 | 0.4162 | **0.2495** |
+| exp_001 | 0.9268 | 0.7570 | 0.5756 | **0.4677** |
+
+`exp_001` slightly LOSES at h+1-12 and nearly doubles persistence at h+37-48.
+The aggregate (+0.1168) hides both halves. Read `--horizon` before concluding.
+
+### What the paper does (Wang et al. §3.3, Tables 4 & 6)
+
+| | Paper | This repo |
+|---|---|---|
+| Metrics | RMSE, NSE, KGE | NSE, KGE, RMSE, **+MAE** |
+| Stations / basins | **2** (Shuangpai, Fenghuang) | **508** |
+| Resolution | daily | hourly |
+| Horizon | 7 steps | 48 h |
+| Reported per | each step (1, 3, 5, 7) | 4 buckets of 12 h |
+| Averaged over | **10 independent runs** (seeds) | **508 basins** (median) |
+| Significance | Wilcoxon, α=0.05, paired across runs | Wilcoxon, paired across **basins** |
+
+**Per-horizon reporting is NOT bespoke.** The paper reports 3-, 5-, and 7-step
+separately and its headline claim is explicitly per-step; lead-time degradation
+is the central phenomenon in multi-step forecasting. Bucketing 48 hourly
+horizons into 4 ranges is a readability choice, not a methodological one.
+
+**The aggregation axis is what changed, and it is forced.** With 2 stations the
+paper can afford 10 runs each and average over seeds. At 508 basins and ~6.4 h
+per run, 10 seeds x 31 experiments is ~2,000 h. So we aggregate across basins
+instead — the standard move in large-sample hydrology — and use the median
+because mean-across-basins is meaningless with 39 negative-NSE catchments. The
+paper never hits this: two well-gauged stations have no near-zero denominators.
+
+### The gap we have NOT closed: seed variance
+
+Every run here is **seed 42**. The paper's robustness claim — "shortest box,
+highest median, smallest IQR" over ten runs — is one we currently **cannot
+make**. `run_ablation.py --seeds 42 123 777` exists, so the machinery is there;
+the cost is ~19 h per experiment.
+
+Decision: **do not** multi-seed all 31. Multi-seed only the one comparison the
+thesis rests on — see TASKS.md T1.
+
+### Numbers are not comparable across papers
+
+The paper reports all seven models above NSE 0.7 on two well-gauged DAILY
+stations. We are at 0.6419 median across 508 HOURLY basins including nearly dry
+ones. Different task; the gap is not evidence of a worse implementation. The
+comparison that IS meaningful is internal and same-split:
+`exp_020__dmel` − `exp_001__baseline`.
+
+### Significance testing
+
+`wilcoxon_nse` (`src/evaluate.py:371`) pairs the two runs' per-basin NSE by
+`basin_id` and runs a one-sided signed-rank test. `metrics_dev.json` stores all
+508 per-basin records precisely so this is possible after the fact.
+
+```bash
+.venv/bin/python -c "
+import sys; sys.path.insert(0,'src')
+from evaluate import EvalResult, wilcoxon_nse
+a=EvalResult.load('experiments/exp_001__baseline/metrics_dev.json')
+b=EvalResult.load('experiments/baseline_persistence/metrics_dev.json')
+print(wilcoxon_nse(a,b))"
+```
+
+Measured, `exp_001` vs persistence: `p = 1.79e-17`, `n_pairs = 508`,
+`delta_median = +0.1168`. So the baseline's edge over persistence is significant
+across catchments — but this says **nothing** about seed variance, which is the
+axis the paper tests. See TASKS.md T1.
+
+---
+
 ## Reading the results
 
 ```bash
