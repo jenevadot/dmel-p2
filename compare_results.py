@@ -68,6 +68,16 @@ def main():
                         help="Show san_val->dev gap and mean gradient norm")
     parser.add_argument("--wilcoxon", action="store_true",
                         help="Run Wilcoxon test vs baseline")
+    parser.add_argument("--horizon", action="store_true",
+                        help="Show median NSE per lead-time bucket "
+                             "(h1_12 / h13_24 / h25_36 / h37_48)")
+    parser.add_argument("--rank_by", default="median_nse",
+                        choices=["median_nse", "h37_48"],
+                        help="Ranking metric. h37_48 is the 37-48h lead-time "
+                             "bucket — the largest margin over persistence "
+                             "(+0.242 vs +0.079 at h1_12) and where method "
+                             "differences actually show up, since h1_12 is "
+                             "saturated by persistence.")
     parser.add_argument("--baseline", default="exp_001__baseline",
                         help="Baseline experiment name for Wilcoxon")
     args = parser.parse_args()
@@ -79,9 +89,23 @@ def main():
 
     summaries = load_summaries(results.keys())
 
-    # Sort by median NSE (primary ranking metric)
-    ranked = sorted(results.items(),
-                    key=lambda x: x[1].median_nse, reverse=True)
+    # Sort by the chosen ranking metric.
+    #
+    # median_nse is the headline, but it is dominated by the short lead times
+    # that persistence already solves (h1_12 sits at ~0.92 for every model).
+    # Ranking by h37_48 instead surfaces the experiments that actually improve
+    # the forecast where the contribution lives.
+    def _h37(res) -> float:
+        # Missing bucket sorts last rather than crashing: older runs predate
+        # horizon_nse, and a scoreboard must still print.
+        return (res.horizon_nse or {}).get("h37_48", float("-inf"))
+
+    if args.rank_by == "h37_48":
+        ranked = sorted(results.items(), key=lambda x: _h37(x[1]),
+                        reverse=True)
+    else:
+        ranked = sorted(results.items(),
+                        key=lambda x: x[1].median_nse, reverse=True)
 
     baseline_result = results.get(args.baseline)
 
@@ -89,15 +113,25 @@ def main():
     kge_col = "  med KGE" if args.kge else ""
     gap_col = f"  {'gap':>7}  {'gnorm':>5}" if args.gap else ""
     w_col   = "  p-val  sig" if args.wilcoxon else ""
+    hz_col  = (f"  {'h1_12':>7}  {'h13_24':>7}  {'h25_36':>7}  {'h37_48':>7}"
+               if args.horizon else "")
     print(f"\n  {'Rank':>4}  {'Experiment':<42}  "
           f"{'med NSE':>8}  {'mean NSE':>9}  {'>0.7%':>6}"
-          f"  {'ep':>3}{kge_col}{gap_col}{w_col}")
+          f"  {'ep':>3}{kge_col}{hz_col}{gap_col}{w_col}")
     print("  " + "-" * (75 + (10 if args.kge else 0)
+                           + (36 if args.horizon else 0)
                            + (16 if args.gap else 0)
                            + (12 if args.wilcoxon else 0)))
 
     for rank, (name, res) in enumerate(ranked, 1):
         kge_str = f"  {res.median_kge:>8.4f}" if args.kge else ""
+
+        hz_str = ""
+        if args.horizon:
+            hz = res.horizon_nse or {}
+            for b in ("h1_12", "h13_24", "h25_36", "h37_48"):
+                v = hz.get(b)
+                hz_str += f"  {v:>7.4f}" if v is not None else f"  {'-':>7}"
 
         gap_str = ""
         if args.gap:
@@ -120,7 +154,7 @@ def main():
             f"{res.median_nse:>8.4f}  {res.mean_nse:>9.4f}  "
             f"{res.pct_nse_07:>5.1f}%  "
             f"{res.best_epoch:>3}"
-            f"{kge_str}{gap_str}{w_str}{marker}"
+            f"{kge_str}{hz_str}{gap_str}{w_str}{marker}"
         )
 
     print(f"\n  {len(results)} experiments loaded from {EXP_DIR}")
@@ -129,6 +163,25 @@ def main():
         best_name, best_res = ranked[0]
         delta = best_res.median_nse - baseline_result.median_nse
         print(f"  Best vs baseline: {delta:+.4f} NSE  ({best_name})")
+
+        if args.horizon:
+            b37 = _h37(baseline_result)
+            d37 = _h37(best_res) - b37
+            if b37 != float("-inf"):
+                print(f"  Best vs baseline @ h37_48: {d37:+.4f} NSE")
+
+    if args.horizon:
+        print("\n  Lead-time buckets = median NSE over that slice of the 48h")
+        print("          forecast, pooled per basin then medianed across")
+        print("          basins. Each bucket has its OWN variance denominator,")
+        print("          so the four do NOT average to med NSE.")
+        print("  h37_48  the bucket that matters. Margin over persistence is")
+        print("          +0.242 there vs +0.079 at h1_12, where persistence")
+        print("          alone already scores ~0.84 and every model saturates")
+        print("          near 0.92. Rank with --rank_by h37_48.")
+        print("  CAUTION single seed (42) per experiment: a gap under ~0.01 is")
+        print("          not distinguishable from seed noise. Shortlist here,")
+        print("          then multi-seed the finalists before claiming an effect.")
 
     if args.gap:
         print("\n  gap   = dev median NSE - san_val median NSE")
