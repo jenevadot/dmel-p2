@@ -36,9 +36,9 @@ from config       import (TRAIN_CFG, INFORMER_CFG, LSTM_CFG, ENSEMBLE_CFG,
 from dataset      import build_splits, make_loader
 from models.dmel  import build_model
 from train        import (build_optimizer, build_scheduler,
-                          build_loss, train_one_epoch, quick_nse,
+                          build_loss, train_one_epoch, quick_nse, ModelEMA,
                           scheduler_granularity, adjust_patience_for_scheduler)
-from early_stopping import EarlyStopping
+from early_stopping import EarlyStopping, CheckpointManager
 from evaluate       import evaluate_model, EvalResult
 
 
@@ -126,22 +126,36 @@ def run(
         # 2. Data
         print("\n[data] Building splits and normalizer...")
         from config import CEEMDAN_CFG
+        # CEEMDAN keys (n_high, n_low, hf_rule, ...) must reach BOTH the data
+        # side and build_model / the router. They used to reach only
+        # build_splits, which is how build_model fell back to n_high=5 while
+        # the router sent 2 tensors.
+        for k, v in CEEMDAN_CFG.items():
+            if k != "cache_dir":
+                cfg.setdefault(k, v)
         ceemdan_cfg = {**CEEMDAN_CFG, **{k: v for k, v in cfg.items()
                                          if k in CEEMDAN_CFG}}
+        train_all = cfg.get("train_all_basins", False)
+        split_seed = cfg.get("split_seed")
+        split_seed = seed if split_seed is None else split_seed
         ds_train, ds_sanval, ds_dev, ds_test, normalizer, split_stats = \
             build_splits(
                 norm_strategy  = cfg.get("norm_strategy", "per_basin_zscore"),
-                seed           = seed,
+                seed           = split_seed,
                 seq_len        = cfg.get("seq_len", HISTORY_HOURS),
                 input_channels = cfg.get("input_channels"),
-                use_ceemdan    = cfg.get("use_ceemdan", False),
+                use_ceemdan    = (cfg.get("use_ceemdan", False)
+                                  or cfg.get("rimf_append", False)),
                 want_aux       = cfg.get("aux_task", False),
                 ceemdan_cfg    = ceemdan_cfg,
                 verbose        = verbose,
+                holdout        = not train_all,
             )
         train_loader  = make_loader(ds_train,  cfg["batch_size"], shuffle=True,
                                      generator=loader_gen)
-        sanval_loader = make_loader(ds_sanval, cfg["batch_size"], shuffle=False)
+        sanval_loader = (make_loader(ds_sanval, cfg["batch_size"],
+                                     shuffle=False)
+                         if ds_sanval is not None else None)
         dev_loader    = make_loader(ds_dev,    cfg["batch_size"], shuffle=False)
 
         # Persist the TRAIN-split normalisation beside the checkpoint.
@@ -158,6 +172,14 @@ def run(
         n_params = sum(p.numel() for p in model.parameters()
                        if p.requires_grad)
         print(f"  Parameters: {n_params:,}")
+
+        ema_decay = cfg.get("ema_decay", 0.0) or 0.0
+        ema = ModelEMA(model, ema_decay) if ema_decay > 0 else None
+        ema_path = exp_dir / "best_model_ema.pt"
+        best_ema_nse, best_ema_epoch = -float("inf"), -1
+        if ema is not None:
+            print(f"  [ema] shadow weights, decay={ema_decay} "
+                  f"(logged + saved; selection still uses raw weights)")
 
         # 4. Optimiser / scheduler / criterion
         optimizer = build_optimizer(model, cfg, log=print)
@@ -194,7 +216,8 @@ def run(
         hist_f    = open(hist_path, "w", newline="")
         hist_csv  = csv.writer(hist_f)
         hist_csv.writerow(["epoch", "train_loss", "sanval_nse",
-                            "lr", "grad_norm", "elapsed_s"])
+                            "lr", "grad_norm", "elapsed_s",
+                            "sanval_nse_ema"])
 
         # 7. Training loop
         print(f"\n[train] Starting — max {n_epochs} epochs, "
@@ -205,12 +228,25 @@ def run(
 
             tr = train_one_epoch(
                 model, train_loader, optimizer, criterion,
-                scheduler, device, cfg, epoch,
+                scheduler, device, cfg, epoch, ema=ema,
             )
             avg_loss  = tr["train_loss"]
             grad_norm = tr["grad_norm"]
 
-            nse_val = quick_nse(model, sanval_loader, normalizer, device, cfg)
+            if sanval_loader is not None:
+                nse_val = quick_nse(model, sanval_loader, normalizer,
+                                    device, cfg)
+            else:
+                nse_val = float("nan")       # train_all_basins: no holdout
+
+            nse_ema = float("nan")
+            if ema is not None and sanval_loader is not None:
+                nse_ema = quick_nse(ema.module, sanval_loader, normalizer,
+                                    device, cfg)
+                if nse_ema > best_ema_nse:
+                    best_ema_nse, best_ema_epoch = nse_ema, epoch
+                    torch.save({"model_state": ema.state_dict(),
+                                "epoch": epoch, "nse": nse_ema}, ema_path)
 
             # ReduceLROnPlateau needs the metric, not a bare step
             if isinstance(scheduler,
@@ -221,13 +257,15 @@ def run(
             elapsed = time.time() - ep_t0
 
             gn_str = f" | gnorm {grad_norm:.3f}" if grad_norm is not None else ""
+            ema_str = f" | ema {nse_ema:.5f}" if ema is not None else ""
             print(f"  epoch {epoch:3d} | loss {avg_loss:.5f} "
-                  f"| sanval_nse {nse_val:.5f} "
+                  f"| sanval_nse {nse_val:.5f}{ema_str} "
                   f"| lr {cur_lr:.2e}{gn_str} | {elapsed:.1f}s")
 
             hist_csv.writerow([epoch, avg_loss, nse_val, cur_lr,
                                 "" if grad_norm is None else f"{grad_norm:.6f}",
-                                f"{elapsed:.1f}"])
+                                f"{elapsed:.1f}",
+                                "" if ema is None else f"{nse_ema:.6f}"])
             hist_f.flush()
             history.append({
                 "epoch": epoch, "train_loss": avg_loss,
@@ -235,6 +273,8 @@ def run(
                 "grad_norm": grad_norm,
             })
 
+            if train_all:
+                continue        # fixed budget: no selection, no stopping
             stopper.step(nse_val, model, optimizer, scheduler, epoch,
                          extra={"train_loss": avg_loss,
                                 "grad_norm": grad_norm})
@@ -244,9 +284,23 @@ def run(
 
         hist_f.close()
 
-        # 8. Restore best weights
-        print(f"\n[train] Restoring best weights (epoch {stopper.best_epoch})")
-        stopper.restore_best(model, optimizer, scheduler, device)
+        # 8. Restore best weights (or keep the last epoch in final mode)
+        if train_all:
+            last_epoch = len(history) - 1
+            CheckpointManager(str(exp_dir)).save(
+                model, optimizer, scheduler, last_epoch, float("nan"),
+                extra={"train_loss": history[-1]["train_loss"]})
+            stopper.best_epoch, stopper.best_nse = last_epoch, float("nan")
+            if ema is not None:
+                best_ema_epoch = last_epoch
+                torch.save({"model_state": ema.state_dict(),
+                            "epoch": last_epoch, "nse": float("nan")},
+                           ema_path)
+            print(f"\n[train] Fixed budget done — keeping epoch {last_epoch}")
+        else:
+            print(f"\n[train] Restoring best weights "
+                  f"(epoch {stopper.best_epoch})")
+            stopper.restore_best(model, optimizer, scheduler, device)
 
         # 9. Final evaluation on dev split
         print("\n[eval] Evaluating on dev split (split=1)...")
@@ -257,21 +311,49 @@ def run(
             cfg        = cfg,
             verbose    = verbose,
         )
-        eval_dev.save(str(dev_metric))
-
         # 10. Evaluation on san_val at best epoch
-        print("\n[eval] Evaluating on san_val...")
-        eval_sanval = evaluate_model(
-            model, sanval_loader, normalizer, device,
-            split_name = "san_val",
-            best_epoch = stopper.best_epoch,
-            cfg        = cfg,
-            verbose    = False,
-        )
-        eval_sanval.save(str(exp_dir / "metrics_sanval.json"))
+        if sanval_loader is not None:
+            print("\n[eval] Evaluating on san_val...")
+            eval_sanval = evaluate_model(
+                model, sanval_loader, normalizer, device,
+                split_name = "san_val",
+                best_epoch = stopper.best_epoch,
+                cfg        = cfg,
+                verbose    = False,
+            )
+            eval_sanval.save(str(exp_dir / "metrics_sanval.json"))
+        else:
+            eval_sanval = EvalResult(split_name="san_val",
+                                     median_nse=float("nan"),
+                                     mean_nse=float("nan"))
+
+        # 10b. The EMA shadow at ITS best epoch — reported, never selected on.
+        eval_dev_ema = eval_sanval_ema = None
+        if ema is not None and ema_path.exists():
+            ema_ckpt = torch.load(ema_path, map_location=device,
+                                  weights_only=False)
+            ema.module.load_state_dict(ema_ckpt["model_state"])
+            print(f"\n[eval] EMA weights (epoch {best_ema_epoch}) on dev...")
+            eval_dev_ema = evaluate_model(
+                ema.module, dev_loader, normalizer, device,
+                split_name="dev_ema", best_epoch=best_ema_epoch, cfg=cfg,
+                verbose=verbose)
+            eval_dev_ema.save(str(exp_dir / "metrics_dev_ema.json"))
+            if sanval_loader is not None:
+                eval_sanval_ema = evaluate_model(
+                    ema.module, sanval_loader, normalizer, device,
+                    split_name="san_val_ema", best_epoch=best_ema_epoch,
+                    cfg=cfg, verbose=False)
+                eval_sanval_ema.save(
+                    str(exp_dir / "metrics_sanval_ema.json"))
 
         # 11. Save config
         _save_config(cfg, exp_dir / "config.json")
+
+        # Written LAST among the metrics: experiment.run() treats an existing
+        # metrics_dev.json as "complete", so it must not appear before the
+        # san_val / EMA / config artefacts do.
+        eval_dev.save(str(dev_metric))
 
         # 12. Save run summary
         # This is the self-describing record of the run: what was selected
@@ -295,15 +377,37 @@ def run(
             # report_split    : the split the headline number comes from
             # These must differ. If they were ever the same, the reported
             # metric would be optimistically biased by construction.
-            "selection_split" : "san_val",
+            "selection_split" : ("none (fixed epochs)" if train_all
+                                 else "san_val"),
             "report_split"    : "dev",
+            "split_seed"      : split_seed,
+            "train_all_basins": train_all,
 
-            # headline (dev — never touched during training)
+            # headline (dev). NOT untouched: ~55% of dev inputs and ~25% of
+            # dev targets overlap split=0 in time (benchmark-inherent; test.h5
+            # shares it). dev_subset_median_nse reports dev_clean separately.
             "dev_median_nse"  : eval_dev.median_nse,
             "dev_mean_nse"    : eval_dev.mean_nse,
             "dev_median_kge"  : eval_dev.median_kge,
             "dev_pct_nse_05"  : eval_dev.pct_nse_05,
             "dev_pct_nse_07"  : eval_dev.pct_nse_07,
+            "dev_mean_nse_clip": eval_dev.mean_nse_clip,
+            "dev_highflow_beta": eval_dev.median_highflow_beta,
+            "dev_fhv"         : eval_dev.median_fhv,
+            "dev_subset_median_nse": eval_dev.subset_median_nse,
+            "dev_horizon_nse_persistence": eval_dev.horizon_nse_persistence,
+
+            # EMA shadow (reported only; never used for selection)
+            "ema_decay"       : ema_decay,
+            "best_ema_epoch"  : best_ema_epoch if ema is not None else None,
+            "best_sanval_nse_ema": (best_ema_nse if ema is not None
+                                    and best_ema_epoch >= 0 else None),
+            "dev_median_nse_ema": (eval_dev_ema.median_nse
+                                   if eval_dev_ema else None),
+            "dev_horizon_nse_ema": (eval_dev_ema.horizon_nse
+                                    if eval_dev_ema else None),
+            "sanval_median_nse_ema": (eval_sanval_ema.median_nse
+                                      if eval_sanval_ema else None),
 
             # selection split metrics — kept so tuning can be compared
             # WITHOUT reading dev. Prefer these for any iteration decision.
@@ -359,6 +463,10 @@ def run(
             "dev_horizon_nse" : eval_dev.horizon_nse,
             "use_basin_emb"   : cfg.get("use_basin_emb"),
             "use_ceemdan"     : cfg.get("use_ceemdan"),
+            "rimf_append"     : cfg.get("rimf_append"),
+            "residual_output" : cfg.get("residual_output"),
+            "pad_mode"        : cfg.get("pad_mode"),
+            "base_model"      : cfg.get("base_model"),
             "ensemble_method" : cfg.get("ensemble_method"),
 
             # cost

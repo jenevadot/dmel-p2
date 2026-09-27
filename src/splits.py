@@ -718,3 +718,76 @@ if __name__ == "__main__":
         print("\n  [skip] real-data checks — train.h5 not found")
 
     print("\n✓ splits.py self-test passed\n")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 7. Per-window dev overlap flags (for the dev-clean / dev-overlap report)
+# ─────────────────────────────────────────────────────────────────────
+
+DEV_OVERLAP_CACHE = DATA_DIR / "dev_overlap_flags.npz"
+
+
+def dev_overlap_flags(
+    train_h5: str = str(TRAIN_H5),
+    cache: Path = DEV_OVERLAP_CACHE,
+    force: bool = False,
+    verbose: bool = True,
+) -> Dict[str, np.ndarray]:
+    """
+    Flag every dev (split=1) window by whether it overlaps split=0 in time,
+    with the same 6-gram criterion as `measure_leakage`, over ALL 508 basins.
+
+    Returns (and caches) arrays aligned on `rows` (dev row indices):
+      input_seen  : the 336 h input shares >= MIN_MATCH_RUN grams with any
+                    split=0 input or target of the same basin
+      target_seen : the 48 h TARGET does — the case where memorisation could
+                    inflate dev NSE
+    A window is "dev-clean" when neither flag is set.
+
+    `measure_dev_contamination` samples 10 basins for a headline rate; this
+    is the full per-window version the evaluation report needs.
+    """
+    cache = Path(cache)
+    if cache.exists() and not force:
+        d = np.load(cache)
+        return {k: d[k] for k in d.files}
+
+    with h5py.File(train_h5, "r") as f:
+        split_flags = f["split"][:]
+        basin_ids = f["basin_id"][:]
+        X, Y = f["X"], f["y"]
+        rows_all, in_all, tg_all = [], [], []
+        basins = np.unique(basin_ids)
+        for j, b in enumerate(basins):
+            r0 = np.sort(np.where((split_flags == SPLIT_TRAIN)
+                                  & (basin_ids == b))[0])
+            r1 = np.sort(np.where((split_flags == 1) & (basin_ids == b))[0])
+            if len(r1) == 0:
+                continue
+            bag = set()
+            if len(r0):
+                bag = (_gram_set(X[r0][:, :, TARGET_CHANNEL].astype(np.float32))
+                       | _gram_set(Y[r0].astype(np.float32)))
+            x1 = X[r1][:, :, TARGET_CHANNEL].astype(np.float32)
+            y1 = Y[r1].astype(np.float32)
+            for i, (xw, yw) in enumerate(zip(x1, y1)):
+                rows_all.append(r1[i])
+                in_all.append(sum(g in bag for g in _grams_of(xw))
+                              >= MIN_MATCH_RUN)
+                tg_all.append(sum(g in bag for g in _grams_of(yw))
+                              >= MIN_MATCH_RUN)
+            if verbose and j % 25 == 0:
+                print(f"\r[splits] dev overlap flags {j + 1}/{len(basins)}",
+                      end="", flush=True)
+
+    out = {"rows": np.asarray(rows_all, np.int64),
+           "input_seen": np.asarray(in_all, bool),
+           "target_seen": np.asarray(tg_all, bool)}
+    np.savez(cache, **out)
+    if verbose:
+        clean = ~(out["input_seen"] | out["target_seen"])
+        print(f"\n[splits] dev windows: {len(clean):,}  input_seen "
+              f"{out['input_seen'].mean():.1%}  target_seen "
+              f"{out['target_seen'].mean():.1%}  clean {clean.mean():.1%}"
+              f"  -> {cache.name}")
+    return out

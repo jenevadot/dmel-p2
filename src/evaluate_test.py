@@ -140,18 +140,22 @@ def load_test_targets(csv_path: Path = TEST_TARGETS_CSV,
 # 2.  Checkpoint loading
 # ─────────────────────────────────────────────────────────────────────
 
-def load_checkpoint(exp_dir: Path, device, verbose: bool = True):
+def load_checkpoint(exp_dir: Path, device, verbose: bool = True,
+                    ckpt_name: str = "best_model.pt",
+                    overrides: Optional[dict] = None):
     """
-    Rebuild the model exactly as the run configured it and load best_model.pt.
+    Rebuild the model exactly as the run configured it and load a checkpoint
+    (best_model.pt, or best_model_ema.pt for the EMA shadow).
 
     The config is read from the run's own config.json rather than from the
     live TRAIN_CFG, so editing the defaults later cannot retroactively change
-    how an old checkpoint is reconstructed.
+    how an old checkpoint is reconstructed. `overrides` patches it — needed
+    for runs whose config.json was never written (exp_034).
     """
     import torch
     from models.dmel import build_model
 
-    ckpt_path = exp_dir / "best_model.pt"
+    ckpt_path = exp_dir / ckpt_name
     cfg_path  = exp_dir / "config.json"
 
     if not ckpt_path.exists():
@@ -166,11 +170,21 @@ def load_checkpoint(exp_dir: Path, device, verbose: bool = True):
         print(f"[warn] {cfg_path} missing — falling back to current TRAIN_CFG. "
               f"If the run used non-default architecture flags this will "
               f"build the wrong model and fail to load the state dict.")
+    cfg.update(overrides or {})
 
     model = build_model(cfg).to(device)
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     state = ckpt.get("model_state", ckpt.get("state_dict", ckpt))
+    # DMEL checkpoints from before the n_high fix carry 3 extra Informers
+    # (hf_branches.2-4) that never received input or gradient. Drop exactly
+    # those; any other mismatch still fails loudly below.
+    own = model.state_dict()
+    dead = [k for k in state if k not in own and k.startswith("hf_branches.")]
+    for k in dead:
+        del state[k]
+    if dead and verbose:
+        print(f"[model] dropped {len(dead)} tensors of never-used HF branches")
     model.load_state_dict(state)
     model.eval()
 

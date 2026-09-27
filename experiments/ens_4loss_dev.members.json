@@ -1,0 +1,11 @@
+{
+  "members": [
+    "exp_001__baseline",
+    "exp_009__huber",
+    "exp_010__huber_d05",
+    "exp_012__mae"
+  ],
+  "checkpoint": "best_model.pt",
+  "split": "dev",
+  "overrides": {}
+}

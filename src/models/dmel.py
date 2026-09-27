@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import (
-    INFORMER_CFG, LSTM_CFG, ENSEMBLE_CFG,
+    INFORMER_CFG, LSTM_CFG, ENSEMBLE_CFG, CEEMDAN_CFG, TARGET_CHANNEL,
     HISTORY_HOURS, FORECAST_HOURS, N_CHANNELS, N_AUX_CHANNELS, N_BASINS,
 )
 from models.informer   import Informer
@@ -111,6 +111,13 @@ class DMEL(nn.Module):
     basin_emb_dim : dimension of basin embedding
     informer_cfg  : dict of Informer kwargs (from config.py)
     lstm_cfg      : dict of LSTMBranch kwargs (from config.py)
+    residual_output : baseline mode only. Predict the CHANGE from the last
+                    observed discharge: pred = f(x) + x[:, -1, residual_idx].
+                    A zero network then forecasts persistence exactly, which
+                    targets the measured h+1..3 / steady-flow deficit.
+    residual_idx  : column of discharge in x (TARGET_CHANNEL unless
+                    input_channels subsets it)
+    base_model    : baseline mode only. "informer" | "lstm"
     """
 
     def __init__(
@@ -120,8 +127,8 @@ class DMEL(nn.Module):
         label_len       : int   = INFORMER_CFG["label_len"],
         pred_len        : int   = FORECAST_HOURS,
         use_ceemdan     : bool  = False,
-        n_high          : int   = 5,
-        n_low           : int   = 1,
+        n_high          : int   = CEEMDAN_CFG["n_high"],
+        n_low           : int   = CEEMDAN_CFG["n_low"],
         shared_informer : bool  = False,
         shared_lstm     : bool  = False,
         combine         : str   = ENSEMBLE_CFG["method"],
@@ -130,6 +137,9 @@ class DMEL(nn.Module):
         informer_cfg    : dict  = None,
         lstm_cfg        : dict  = None,
         n_aux           : int   = 0,
+        residual_output : bool  = False,
+        residual_idx    : int   = TARGET_CHANNEL,
+        base_model      : str   = "informer",
     ):
         super().__init__()
         self.use_ceemdan     = use_ceemdan
@@ -139,6 +149,15 @@ class DMEL(nn.Module):
         self.n_low           = n_low
         self.shared_informer = shared_informer
         self.shared_lstm     = shared_lstm
+        self.residual_output = residual_output
+        self.residual_idx    = residual_idx
+        self.base_model      = base_model
+
+        if residual_output and use_ceemdan:
+            # Each branch would add the last value again: the sum of K
+            # residual branches predicts K x persistence.
+            raise ValueError("residual_output applies to baseline mode only "
+                             "(use_ceemdan=False)")
 
         icfg = informer_cfg or INFORMER_CFG
         lcfg = lstm_cfg     or LSTM_CFG
@@ -168,6 +187,7 @@ class DMEL(nn.Module):
                 use_distil = icfg["use_distil"],
                 attention  = icfg.get("attention", "full"),
                 n_aux      = n_aux,
+                pad_mode   = icfg.get("pad_mode", "circular"),
             )
 
         def _make_lstm(c):
@@ -187,7 +207,15 @@ class DMEL(nn.Module):
         # branch there is nothing to combine, so a combiner is genuinely not
         # needed here — but the flag is now validated instead of ignored.
         if not use_ceemdan:
-            self.informer = _make_informer(eff_c_in)
+            if base_model == "informer":
+                self.informer = _make_informer(eff_c_in)
+            elif base_model == "lstm":
+                if n_aux:
+                    raise ValueError("aux_task needs the Informer encoder; "
+                                     "base_model='lstm' has no aux head")
+                self.lstm_base = _make_lstm(eff_c_in)
+            else:
+                raise ValueError(f"Unknown base_model: {base_model!r}")
             self.combiner = None
             if combine != "sum":
                 raise ValueError(
@@ -251,7 +279,20 @@ class DMEL(nn.Module):
 
         # ── Baseline: single Informer on full input ───────────────────
         if not self.use_ceemdan:
-            return self.informer(x, x_dec, return_aux=return_aux)
+            if self.base_model == "lstm":
+                out = self.lstm_base(x)
+                out = (out, None) if return_aux else out
+            else:
+                out = self.informer(x, x_dec, return_aux=return_aux)
+            if not self.residual_output:
+                return out
+            # x[:, -1, residual_idx] is the last observed discharge in the
+            # same per-basin z-units as y (dataset.py normalises both with the
+            # target channel's stats).
+            last = x[:, -1, self.residual_idx].unsqueeze(1)    # (B, 1)
+            if return_aux:
+                return out[0] + last, out[1]
+            return out + last
 
         # ── DMEL: dual-channel ────────────────────────────────────────
         if x_high is None or x_low is None:
@@ -263,6 +304,16 @@ class DMEL(nn.Module):
         if self.use_basin_emb and basin_ids is not None:
             x_high = [self._add_basin_emb(xh, basin_ids) for xh in x_high]
             x_low  = [self._add_basin_emb(xl, basin_ids) for xl in x_low]
+
+        # A branch-count mismatch used to allocate dead Informers silently:
+        # n_high defaulted to 5 here while the router sent 2 tensors, so 56%
+        # of the reported parameters never received input or gradient.
+        if not self.shared_informer and len(x_high) != len(self.hf_branches):
+            raise ValueError(f"{len(x_high)} HF inputs for "
+                             f"{len(self.hf_branches)} HF branches")
+        if not self.shared_lstm and len(x_low) != len(self.lf_branches):
+            raise ValueError(f"{len(x_low)} LF inputs for "
+                             f"{len(self.lf_branches)} LF branches")
 
         # High-frequency predictions
         hf_preds = []
@@ -313,6 +364,18 @@ def build_model(cfg: dict) -> DMEL:
     input_channels = cfg.get("input_channels")
     default_c_in = (len(input_channels) if input_channels is not None
                     else N_CHANNELS)
+    # rimf_append: the K cached RIMFs ride along as extra input channels.
+    if cfg.get("rimf_append", False):
+        default_c_in += cfg.get("n_rimf", CEEMDAN_CFG["n_rimf"])
+
+    # Discharge column after channel subsetting; appended RIMFs and a basin
+    # embedding go AFTER the raw channels, so the index is unaffected.
+    residual_idx = TARGET_CHANNEL
+    if cfg.get("residual_output", False) and input_channels is not None:
+        if TARGET_CHANNEL not in input_channels:
+            raise ValueError("residual_output needs the discharge channel "
+                             f"({TARGET_CHANNEL}) in input_channels")
+        residual_idx = list(input_channels).index(TARGET_CHANNEL)
 
     return DMEL(
         c_in            = cfg.get("c_in") or default_c_in,
@@ -320,14 +383,19 @@ def build_model(cfg: dict) -> DMEL:
         label_len       = cfg.get("label_len",        INFORMER_CFG["label_len"]),
         pred_len        = cfg.get("pred_len",         FORECAST_HOURS),
         use_ceemdan     = cfg.get("use_ceemdan",      False),
-        n_high          = cfg.get("n_high",           5),
-        n_low           = cfg.get("n_low",            1),
+        # Defaults come from CEEMDAN_CFG — the same source the RIMF router
+        # (decompose.assemble_branch_inputs) reads.
+        n_high          = cfg.get("n_high",           CEEMDAN_CFG["n_high"]),
+        n_low           = cfg.get("n_low",            CEEMDAN_CFG["n_low"]),
         shared_informer = cfg.get("shared_informer",  False),
         shared_lstm     = cfg.get("shared_lstm",      False),
         combine         = cfg.get("ensemble_method",  ENSEMBLE_CFG["method"]),
         use_basin_emb   = cfg.get("use_basin_emb",    False),
         basin_emb_dim   = cfg.get("basin_emb_dim",    16),
         n_aux           = (N_AUX_CHANNELS if cfg.get("aux_task", False) else 0),
+        residual_output = cfg.get("residual_output",  False),
+        residual_idx    = residual_idx,
+        base_model      = cfg.get("base_model",       "informer"),
         informer_cfg    = {
             "d_model"   : cfg.get("d_model",    INFORMER_CFG["d_model"]),
             "n_heads"   : cfg.get("n_heads",    INFORMER_CFG["n_heads"]),
@@ -340,6 +408,7 @@ def build_model(cfg: dict) -> DMEL:
             "use_distil": cfg.get("use_distil", INFORMER_CFG["use_distil"]),
             "attention" : cfg.get("attention",  INFORMER_CFG["attention"]),
             "label_len" : cfg.get("label_len",  INFORMER_CFG["label_len"]),
+            "pad_mode"  : cfg.get("pad_mode",   INFORMER_CFG["pad_mode"]),
         },
         lstm_cfg        = {
             "hidden_size"  : cfg.get("lstm_hidden",   LSTM_CFG["hidden_size"]),

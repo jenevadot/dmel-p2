@@ -277,6 +277,43 @@ ABLATION_GRID = [
                       "targets; tests whether near-flat basins hurt training",
         overrides   = {"loss": "nse", "nse_eps": 0.0},
     ),
+
+    # ══════════════════════════════════════════════════════════════════
+    # ITERATION 2 (2026-09-26) — see NEXT_ITERATION.md. The last round
+    # before the final model. Machine A (MPS) runs these; machine B
+    # replicates exp_010 / exp_012 on seeds 123 and 177.
+    # ══════════════════════════════════════════════════════════════════
+    dict(
+        name        = "exp_050__resid_huber05",
+        priority    = "high",
+        description = "[R1] residual-to-persistence output + replicate "
+                      "padding, Huber 0.5 — targets the h1-3 / steady deficit",
+        overrides   = {"loss": "huber", "huber_delta": 0.5,
+                       "residual_output": True, "pad_mode": "replicate"},
+    ),
+    dict(
+        name        = "exp_051__resid_mse",
+        priority    = "high",
+        description = "[R2] residual output + replicate padding, MSE — "
+                      "separates the residual effect from the loss effect",
+        overrides   = {"residual_output": True, "pad_mode": "replicate"},
+    ),
+    dict(
+        name        = "exp_052__rimf_append_huber05",
+        priority    = "high",
+        description = "[R6] Informer + 3 cached RIMFs as extra channels "
+                      "(c_in=15), Huber 0.5 — the one CEEMDAN test",
+        overrides   = {"loss": "huber", "huber_delta": 0.5,
+                       "rimf_append": True},
+    ),
+    dict(
+        name        = "exp_053__lstm_huber05",
+        priority    = "low",
+        description = "plain 2-layer LSTM on the 12 raw channels, Huber 0.5 "
+                      "— paper baseline (DMEL collapsed into an LSTM)",
+        overrides   = {"loss": "huber", "huber_delta": 0.5,
+                       "base_model": "lstm"},
+    ),
 ]
 
 

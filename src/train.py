@@ -380,6 +380,12 @@ def forward_batch(model, batch, cfg, device, normalizer=None):
     if cfg.get("use_basin_emb", False):
         kwargs["basin_ids"] = basin_ids
 
+    if cfg.get("rimf_append", False):
+        # (B, K, T) RIMFs -> K extra channels after the 12 raw ones. Raw
+        # discharge stays in place, so the model can only GAIN information.
+        rimf = batch["rimf"].to(device, non_blocking=True)
+        x = torch.cat([x, rimf.permute(0, 2, 1)], dim=-1)
+
     if cfg.get("use_ceemdan", False):
         from decompose import assemble_branch_inputs
         x_high, x_low = assemble_branch_inputs(
@@ -419,6 +425,49 @@ def compute_loss(criterion, y_pred, y_true, basin_ids,
 # 4. One training epoch
 # ─────────────────────────────────────────────────────────────────────
 
+class ModelEMA:
+    """
+    Exponential moving average of the weights, kept as a separate shadow
+    model that is never trained directly.
+
+        ema <- d * ema + (1 - d) * theta        after every optimizer step
+
+    with the usual warm-up d_t = min(d, (1 + t) / (10 + t)) so the shadow
+    is not anchored to the random initialisation for the first ~1/(1-d)
+    steps. Buffers (the DistilLayer BatchNorm running stats) are COPIED, not
+    averaged: they are already running averages, and copying keeps them
+    consistent with the most recent activations.
+
+    Why: san_val jumps 0.015-0.037 between epochs in the second half of
+    training, and the selected "best epoch" is often a single spike. An
+    averaged model is less exposed to that winner's curse, and it gives the
+    final no-holdout model a stable end point without early stopping.
+
+    The update draws no random numbers, so enabling EMA leaves the raw
+    training trajectory bit-identical.
+    """
+
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        import copy
+        self.decay = decay
+        self.n_updates = 0
+        self.module = copy.deepcopy(model).eval()
+        for p in self.module.parameters():
+            p.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model: nn.Module) -> None:
+        self.n_updates += 1
+        d = min(self.decay, (1 + self.n_updates) / (10 + self.n_updates))
+        for pe, pm in zip(self.module.parameters(), model.parameters()):
+            pe.lerp_(pm.detach(), 1.0 - d)
+        for be, bm in zip(self.module.buffers(), model.buffers()):
+            be.copy_(bm)
+
+    def state_dict(self) -> dict:
+        return self.module.state_dict()
+
+
 # Sample the gradient norm every Nth step when clipping is DISABLED.
 # Measuring on every step would cost a full extra reduction over all
 # parameters; every 50th is <1% overhead and plenty for a per-epoch mean.
@@ -434,9 +483,11 @@ def train_one_epoch(
     device     : torch.device,
     cfg        : dict,
     epoch      : int = 0,
+    ema        : Optional["ModelEMA"] = None,
 ) -> dict:
     """
-    One full pass over the training DataLoader.
+    One full pass over the training DataLoader. `ema`, when given, is updated
+    after every optimizer step.
 
     Returns
     -------
@@ -504,6 +555,8 @@ def train_one_epoch(
             n_grad += 1
 
         optimizer.step()
+        if ema is not None:
+            ema.update(model)
 
         # Step per-batch schedulers AFTER optimizer.step(), per PyTorch's
         # documented order. Stepping before would apply the next step's lr

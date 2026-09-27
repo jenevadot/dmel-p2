@@ -1,0 +1,8 @@
+{
+  "members": [
+    "exp_001__baseline"
+  ],
+  "checkpoint": "best_model.pt",
+  "split": "dev",
+  "overrides": {}
+}

@@ -231,6 +231,26 @@ class EvalResult:
     # this, not by the survivor count — see `aggregate`.
     n_basins_total : int = 0
 
+    # ── extended report (empty in results saved before 2026-09-26) ───
+    # Persistence scored on the SAME windows and buckets, not hardcoded.
+    horizon_nse_persistence : Dict[str, float] = field(default_factory=dict)
+    median_nse_persistence  : float = float("nan")
+    # mean(max(NSE, -1)): a mean that one flashy basin cannot destroy
+    # (basin 377 alone scores -11,155 on dev).
+    mean_nse_clip   : float = float("nan")
+    # Peak behaviour, which median NSE rewards de-emphasising:
+    #   highflow_beta : sum(pred)/sum(obs) over each basin's top-tercile obs
+    #   fhv           : %bias of the top-2% flow-duration-curve volume
+    median_highflow_beta : float = float("nan")
+    median_fhv           : float = float("nan")
+    # Pooled z-space skill vs persistence per lead hour, 1 - MSE_m/MSE_p.
+    skill_by_lead   : List[float] = field(default_factory=list)
+    # Named subsets of windows (e.g. dev_clean / dev_overlap) -> median NSE.
+    subset_median_nse : Dict[str, float] = field(default_factory=dict)
+    # basin_id -> {bucket: NSE}
+    per_basin_horizon : Dict[str, Dict[str, float]] = field(
+        default_factory=dict)
+
     # ── per-basin detail (for Wilcoxon / violin plots) ────────────────
     per_basin   : List[BasinMetrics] = field(default_factory=list)
 
@@ -242,12 +262,18 @@ class EvalResult:
         """Per-lead-time table, with the persistence baseline for reference."""
         if not self.horizon_nse:
             return ""
-        ref = {"h1_12": 0.84, "h13_24": 0.58, "h25_36": 0.35, "h37_48": 0.22}
+        # Persistence on the same windows. The hardcoded point-horizon
+        # values this replaced (0.84/0.58/0.35/0.22) were not bucket-level:
+        # the dev buckets are 0.938/0.686/0.416/0.249, so the old table
+        # reported h1-12 "beating" persistence when it did not.
+        ref = self.horizon_nse_persistence
+        if not ref:
+            return ""
         lines = ["", "  NSE by lead time (median across basins)",
                  "  ─────────────────────────────────────────────────",
                  f"  {'bucket':<10} {'NSE':>8}  {'persistence':>12}  {'delta':>8}"]
         for k in HORIZON_BUCKETS:
-            if k in self.horizon_nse:
+            if k in self.horizon_nse and k in ref:
                 v = self.horizon_nse[k]
                 r = ref[k]
                 lines.append(f"  {k:<10} {v:>8.4f}  {r:>12.2f}  {v - r:>+8.4f}")
@@ -302,6 +328,14 @@ class EvalResult:
             "n_basins_total": self.n_basins_total,
             "n_samples"  : self.n_samples,
             "horizon_nse": self.horizon_nse,
+            "horizon_nse_persistence": self.horizon_nse_persistence,
+            "median_nse_persistence": self.median_nse_persistence,
+            "mean_nse_clip": self.mean_nse_clip,
+            "median_highflow_beta": self.median_highflow_beta,
+            "median_fhv" : self.median_fhv,
+            "skill_by_lead": self.skill_by_lead,
+            "subset_median_nse": self.subset_median_nse,
+            "per_basin_horizon": self.per_basin_horizon,
             "split_name" : self.split_name,
             "best_epoch" : self.best_epoch,
             "per_basin"  : [asdict(b) for b in self.per_basin],
@@ -379,6 +413,11 @@ def wilcoxon_nse(result_a: EvalResult,
     Uses scipy.stats.wilcoxon if available, otherwise reports
     a simple sign-test approximation.
 
+    DESCRIPTIVE ONLY — not a valid test between configurations. It treats
+    basins as independent replicates and ignores training randomness: two
+    seeds of the SAME config give p = 1.3e-8. Compare configs at the seed
+    level (>= 3 seeds per arm) instead.
+
     Returns
     -------
     dict with keys: statistic, p_value, significant, n_pairs,
@@ -424,12 +463,212 @@ def wilcoxon_nse(result_a: EvalResult,
         "delta_median" : float(np.median(a_paired) - np.median(b_paired)),
         "a_median_nse" : float(np.median(a_paired)),
         "b_median_nse" : float(np.median(b_paired)),
+        "descriptive_only": True,
     }
 
 
 # ─────────────────────────────────────────────────────────────────────
 # 5.  Model evaluation loop (torch-dependent)
 # ─────────────────────────────────────────────────────────────────────
+
+def predict(model, loader, device, cfg: Optional[dict] = None,
+            verbose: bool = False, label: str = "") -> Dict[str, np.ndarray]:
+    """
+    Run the model over a loader. Everything stays in per-basin z-units.
+
+    Returns arrays aligned by window:
+      pred, obs  : (N, 48)
+      basin      : (N,)
+      sample_id  : (N,)   row index in the h5
+      last       : (N,)   last observed discharge (persistence), or absent
+                          when the discharge channel was not an input
+    """
+    import torch
+
+    from train import forward_batch
+
+    cfg = cfg or {}
+    model.eval()
+
+    chans = cfg.get("input_channels")
+    last_idx = (TARGET_CHANNEL if chans is None
+                else (list(chans).index(TARGET_CHANNEL)
+                      if TARGET_CHANNEL in chans else None))
+
+    preds, obs, bids, sids, last = [], [], [], [], []
+    n_batches = len(loader)
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(loader):
+            y_pred, _ = forward_batch(model, batch, cfg, device)
+            preds.append(y_pred.float().cpu().numpy())
+            obs.append(batch["y"].numpy())
+            bids.append(batch["basin_id"].numpy())
+            sids.append(batch["sample_id"].numpy())
+            if last_idx is not None:
+                last.append(batch["x"][:, -1, last_idx].numpy())
+            if verbose and (batch_idx % max(1, n_batches // 20) == 0):
+                pct = (batch_idx + 1) / n_batches * 100
+                bar = '█' * int(pct // 5) + '░' * (20 - int(pct // 5))
+                print(f"\r  [evaluate] {label} [{bar}] {pct:5.1f}%", end="")
+    if verbose:
+        print()
+
+    out = {"pred": np.concatenate(preds).astype(np.float32),
+           "obs": np.concatenate(obs).astype(np.float32),
+           "basin": np.concatenate(bids).astype(np.int64),
+           "sample_id": np.concatenate(sids).astype(np.int64)}
+    if last:
+        out["last"] = np.concatenate(last).astype(np.float32)
+    return out
+
+
+def _bucket_nse(o: np.ndarray, p: np.ndarray) -> Dict[str, float]:
+    """Per-bucket NSE for one basin's (n, 48) obs / pred."""
+    res = {}
+    for label, (lo, hi) in HORIZON_BUCKETS.items():
+        oo, pp = o[:, lo:hi].ravel(), p[:, lo:hi].ravel()
+        ss_tot = ((oo - oo.mean()) ** 2).sum()
+        if ss_tot > _EPS:
+            res[label] = float(1.0 - ((oo - pp) ** 2).sum() / ss_tot)
+    return res
+
+
+def _highflow(o: np.ndarray, p: np.ndarray):
+    """(top-tercile bias ratio, top-2% FDC volume %bias) for one basin."""
+    thr = np.quantile(o, 2 / 3)
+    m = o >= thr
+    beta = (float(p[m].sum() / o[m].sum())
+            if m.any() and abs(o[m].sum()) > _EPS else float("nan"))
+    k = max(1, int(round(0.02 * len(o))))
+    os_, ps_ = np.sort(o)[-k:], np.sort(p)[-k:]
+    fhv = (float((ps_.sum() - os_.sum()) / os_.sum() * 100)
+           if abs(os_.sum()) > _EPS else float("nan"))
+    return beta, fhv
+
+
+def _median_nse_of(obs_mm, pred_mm, basin, keep) -> float:
+    vals = []
+    for b in np.unique(basin[keep]):
+        m = keep & (basin == b)
+        o, p = obs_mm[m].ravel(), pred_mm[m].ravel()
+        ss_tot = ((o - o.mean()) ** 2).sum()
+        if ss_tot > _EPS:
+            vals.append(1.0 - ((o - p) ** 2).sum() / ss_tot)
+    return float(np.median(vals)) if vals else float("nan")
+
+
+def score_predictions(
+    P           : Dict[str, np.ndarray],
+    normalizer,
+    split_name  : str = "dev",
+    best_epoch  : int = -1,
+    subsets     : Optional[Dict[str, np.ndarray]] = None,
+    verbose     : bool = True,
+) -> EvalResult:
+    """
+    Score z-space predictions from `predict` (or an average of several — see
+    ensemble_eval.py). Metrics are on denormalised mm/h, per basin, pooled
+    over windows x 48 h; the median across basins is the headline.
+
+    subsets: name -> bool mask over windows, reported as extra median NSEs.
+    """
+    basin = P["basin"]
+    m = normalizer.mean_[basin, TARGET_CHANNEL][:, None]
+    s = normalizer.std_[basin, TARGET_CHANNEL][:, None]
+    obs_mm = P["obs"].astype(np.float64) * s + m
+    pred_mm = P["pred"].astype(np.float64) * s + m
+    has_last = "last" in P
+    if has_last:
+        pers_mm = np.repeat(P["last"].astype(np.float64)[:, None], 48, 1) * s + m
+
+    basin_metrics: List[BasinMetrics] = []
+    horizon: Dict[str, List[float]] = defaultdict(list)
+    horizon_p: Dict[str, List[float]] = defaultdict(list)
+    per_basin_horizon: Dict[str, Dict[str, float]] = {}
+    pers_nse, betas, fhvs = [], [], []
+
+    for bid in np.unique(basin):
+        sel = basin == bid
+        o2, p2 = obs_mm[sel], pred_mm[sel]
+        bm = compute_metrics(o2.ravel(), p2.ravel(), basin_id=bid)
+        basin_metrics.append(bm)
+
+        bh = _bucket_nse(o2, p2)
+        per_basin_horizon[str(int(bid))] = bh
+        for k, v in bh.items():
+            horizon[k].append(v)
+
+        beta, fhv = _highflow(o2.ravel(), p2.ravel())
+        betas.append(beta)
+        fhvs.append(fhv)
+
+        if has_last:
+            q2 = pers_mm[sel]
+            pers_nse.append(compute_metrics(o2.ravel(), q2.ravel()).nse)
+            for k, v in _bucket_nse(o2, q2).items():
+                horizon_p[k].append(v)
+
+    result = aggregate(basin_metrics, split_name=split_name,
+                       best_epoch=best_epoch)
+    result.horizon_nse = {k: float(np.median(v)) for k, v in horizon.items() if v}
+    result.n_basins_total = len(basin_metrics)
+    result.per_basin_horizon = per_basin_horizon
+    nse_arr = np.array([b.nse for b in basin_metrics if b.is_valid()])
+    if len(nse_arr):
+        result.mean_nse_clip = float(np.mean(np.maximum(nse_arr, -1.0)))
+    result.median_highflow_beta = float(np.nanmedian(betas))
+    result.median_fhv = float(np.nanmedian(fhvs))
+
+    if has_last:
+        result.horizon_nse_persistence = {
+            k: float(np.median(v)) for k, v in horizon_p.items() if v}
+        result.median_nse_persistence = float(np.median(pers_nse))
+        oz, pz = P["obs"].astype(np.float64), P["pred"].astype(np.float64)
+        lz = P["last"].astype(np.float64)[:, None]
+        e_m = ((pz - oz) ** 2).sum(0)
+        e_p = ((lz - oz) ** 2).sum(0)
+        result.skill_by_lead = [float(1 - a / b) if b > 0 else float("nan")
+                                for a, b in zip(e_m, e_p)]
+
+    for name, keep in (subsets or {}).items():
+        result.subset_median_nse[name] = _median_nse_of(
+            obs_mm, pred_mm, basin, np.asarray(keep, bool))
+
+    if verbose:
+        print(result.summary())
+        print(result.horizon_summary())
+        extra = [f"mean(max(NSE,-1)) {result.mean_nse_clip:.4f}",
+                 f"high-flow beta {result.median_highflow_beta:.3f}",
+                 f"FHV {result.median_fhv:+.1f}%"]
+        if has_last:
+            extra.append(f"persistence median {result.median_nse_persistence:.4f}")
+        print("  " + " | ".join(extra))
+        for k, v in result.subset_median_nse.items():
+            print(f"  subset {k:<14} median NSE {v:.4f}")
+
+    return result
+
+
+def dev_subsets(sample_ids: np.ndarray) -> Dict[str, np.ndarray]:
+    """
+    dev_clean / dev_overlap masks from the cached per-window overlap flags
+    (splits.dev_overlap_flags). Empty when the cache has not been built, so
+    evaluation never blocks on the ~30 min scan.
+    """
+    from splits import DEV_OVERLAP_CACHE
+    if not Path(DEV_OVERLAP_CACHE).exists():
+        return {}
+    d = np.load(DEV_OVERLAP_CACHE)
+    seen = dict(zip(d["rows"].tolist(),
+                    (d["input_seen"] | d["target_seen"]).tolist()))
+    if not all(int(r) in seen for r in sample_ids[:100]):
+        return {}
+    ov = np.array([seen.get(int(r), True) for r in sample_ids])
+    tg = dict(zip(d["rows"].tolist(), d["target_seen"].tolist()))
+    tseen = np.array([tg.get(int(r), True) for r in sample_ids])
+    return {"dev_clean": ~ov, "dev_overlap": ov,
+            "dev_target_seen": tseen}
+
 
 def evaluate_model(
     model,
@@ -440,9 +679,10 @@ def evaluate_model(
     best_epoch  : int = -1,
     cfg         : Optional[dict] = None,
     verbose     : bool = True,
-) -> EvalResult:
+    return_predictions: bool = False,
+):
     """
-    Run model over all batches, denormalise, compute per-basin metrics.
+    Run model over a loader, denormalise, compute per-basin metrics.
 
     Inputs are built by `train.forward_batch` — the SAME helper training uses.
     Previously this function called `model(x, y_aux=y_aux)`, a kwarg
@@ -450,73 +690,11 @@ def evaluate_model(
     (so use_basin_emb crashed), and never built a decoder input at all. Sharing
     one builder is what prevents train/eval input drift.
     """
-    import torch
-
-    from train import forward_batch
-
-    cfg = cfg or {}
-    model.eval()
-
-    obs_store: Dict[int, List[np.ndarray]] = defaultdict(list)
-    pred_store: Dict[int, List[np.ndarray]] = defaultdict(list)
-
-    n_batches = len(loader)
-
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(loader):
-            y_true = batch["y"].to(device)
-            basin_ids = batch["basin_id"].cpu().numpy()
-
-            y_pred, _ = forward_batch(model, batch, cfg, device)
-
-            y_pred_np = y_pred.cpu().numpy().astype(np.float32)
-            y_true_np = y_true.cpu().numpy().astype(np.float32)
-
-            for i, bid in enumerate(basin_ids):
-                m = normalizer.mean_[bid, TARGET_CHANNEL]
-                s = normalizer.std_[bid, TARGET_CHANNEL]
-                obs_store[bid].append(y_true_np[i] * s + m)
-                pred_store[bid].append(y_pred_np[i] * s + m)
-
-            if verbose and (batch_idx % max(1, n_batches // 20) == 0):
-                pct = (batch_idx + 1) / n_batches * 100
-                bar = '█' * int(pct // 5) + '░' * (20 - int(pct // 5))
-                print(f"\r  [evaluate] {split_name} [{bar}] {pct:5.1f}%", end="")
-
-    if verbose:
-        print()
-
-    # ── per-basin metrics, pooled and per-horizon ─────────────────────
-    basin_metrics: List[BasinMetrics] = []
-    horizon_nse: Dict[str, List[float]] = defaultdict(list)
-
-    for bid in sorted(obs_store.keys()):
-        obs_2d = np.stack(obs_store[bid])      # (n_samples, 48)
-        pred_2d = np.stack(pred_store[bid])
-
-        bm = compute_metrics(obs_2d.ravel(), pred_2d.ravel(), basin_id=bid)
-        basin_metrics.append(bm)
-
-        for label, (lo, hi) in HORIZON_BUCKETS.items():
-            o = obs_2d[:, lo:hi].ravel()
-            p = pred_2d[:, lo:hi].ravel()
-            ss_tot = ((o - o.mean()) ** 2).sum()
-            if ss_tot > _EPS:
-                horizon_nse[label].append(
-                    float(1.0 - ((o - p) ** 2).sum() / ss_tot))
-
-    result = aggregate(basin_metrics, split_name=split_name,
-                       best_epoch=best_epoch)
-    result.horizon_nse = {
-        k: float(np.median(v)) for k, v in horizon_nse.items() if v
-    }
-    result.n_basins_total = len(basin_metrics)
-
-    if verbose:
-        print(result.summary())
-        print(result.horizon_summary())
-
-    return result
+    P = predict(model, loader, device, cfg, verbose=verbose, label=split_name)
+    subsets = dev_subsets(P["sample_id"]) if split_name == "dev" else {}
+    result = score_predictions(P, normalizer, split_name, best_epoch,
+                               subsets=subsets, verbose=verbose)
+    return (result, P) if return_predictions else result
 
 
 # ─────────────────────────────────────────────────────────────────────

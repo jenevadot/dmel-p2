@@ -234,6 +234,16 @@ CEEMDAN_CFG = dict(
                              #   would discard precipitation and guarantee the
                              #   branch underperforms the baseline.
                              # univariate: (B,T,1) per branch, paper-faithful.
+    hf_route       = "se",   # "se" | "frequency" — order of the HF branches.
+                             # "se" (legacy): by SE rank, which swaps the two
+                             #   bands between branches in ~23% of windows.
+                             # "frequency": branch j = j-th fastest band.
+    edge_mode      = "anchor",  # "anchor" | "mirror" — spline boundary.
+                             # "anchor" (legacy, the built cache) pins every
+                             #   IMF to 0 at both window ends, so the HF
+                             #   branches see 0 at the forecast origin.
+                             # "mirror" reflects the outer extrema instead.
+                             #   Needs a cache rebuild (new cache key).
     n_high         = 2,      # RIMFs routed to the Informer (high frequency)
     n_low          = 1,      # RIMFs routed to the LSTM      (low frequency)
     cache_dir      = DATA_DIR,
@@ -268,6 +278,12 @@ INFORMER_CFG = dict(
     label_len      = FORECAST_HOURS // 2,  # decoder start token length
     pred_len       = FORECAST_HOURS,   # output length
     use_distil     = True,   # I10: distillation layers
+    # Padding of the embedding / distillation convs. "circular" is the
+    # original and stays the default so every existing checkpoint rebuilds
+    # identically. It wraps x[0] in beside x[-1], so the embedding of the
+    # forecast origin mixes in the value from 336 h earlier; "replicate"
+    # repeats the edge instead.
+    pad_mode       = "circular", # "circular" | "replicate"
 )
 
 # ── LSTM (Low-Frequency branch) ───────────────────────────
@@ -400,6 +416,38 @@ TRAIN_CFG = dict(
 
     # Restrict the input channels (D1). None = all 12.
     input_channels    = None,
+
+    # Residual-to-persistence output (baseline mode only):
+    #   pred = f(x) + x[:, -1, discharge]
+    # The model then learns the CHANGE from the last observed value. Measured
+    # motivation: every checkpoint loses to persistence at h+1..3 (h+1 MSE is
+    # 3.8x persistence's) and on the 87% of windows with steady flow, and the
+    # plain head has no path from the last observation to the output.
+    residual_output   = False,
+
+    # Baseline model family when use_ceemdan=False: "informer" | "lstm".
+    base_model        = "informer",
+
+    # Feed the K cached RIMFs as EXTRA input channels to the single baseline
+    # model (c_in = 12 + K), raw discharge kept. The cheapest fair test of
+    # whether CEEMDAN carries usable information. Needs the RIMF cache.
+    rimf_append       = False,
+
+    # Exponential moving average of the weights, as a SHADOW model. It is
+    # evaluated on san_val every epoch beside the raw weights and its best
+    # checkpoint is saved as best_model_ema.pt. Selection, early stopping and
+    # the headline dev number still use the RAW weights, so runs stay
+    # comparable with everything trained before EMA existed. 0 disables.
+    ema_decay         = 0.999,
+
+    # Seed of the san_val basin partition. None = use `seed` (the historical
+    # behaviour, where changing the seed also changed the held-out basins).
+    split_seed        = None,
+
+    # FINAL-MODEL MODE: train on every split=0 window of all 508 basins, no
+    # san_val holdout, no early stopping — a fixed `epochs` budget. Saves the
+    # last-epoch weights as best_model.pt and the EMA as best_model_ema.pt.
+    train_all_basins  = False,
 
     # Gradient clipping max norm. 0 disables.
     # The mean PRE-clip gradient norm is logged every epoch (sampled every

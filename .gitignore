@@ -12,6 +12,7 @@ data/rimf_*.h5
 # ── Per-experiment artefacts that are big or machine-local ──────────────
 # 36 MB each. Share deliberately, not via git — see WORKFLOW.md.
 experiments/**/best_model.pt
+experiments/**/best_model_ema.pt
 # Regenerated from the split + seed
 experiments/**/norm.npz
 # Full stdout; history.csv already carries the numbers

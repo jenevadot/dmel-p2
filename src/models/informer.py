@@ -59,11 +59,17 @@ class PositionalEncoding(nn.Module):
 # ─────────────────────────────────────────────────────────────────────
 
 class TokenEmbedding(nn.Module):
-    def __init__(self, c_in: int, d_model: int):
+    def __init__(self, c_in: int, d_model: int, pad_mode: str = "circular"):
         super().__init__()
-        # Conv1d with kernel=3, padding=1 preserves sequence length
+        # Conv1d with kernel=3, padding=1 preserves sequence length.
+        #
+        # pad_mode="circular" (the original, kept as default so old
+        # checkpoints reproduce) wraps x[0] in beside x[T-1]: the embedding of
+        # the most recent hour then mixes in the value from 336 h earlier.
+        # "replicate" repeats the edge value instead, which is the causal-safe
+        # choice for the forecast origin.
         self.conv = nn.Conv1d(c_in, d_model, kernel_size=3, padding=1,
-                              padding_mode="circular", bias=False)
+                              padding_mode=pad_mode, bias=False)
         nn.init.kaiming_normal_(self.conv.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -74,9 +80,10 @@ class TokenEmbedding(nn.Module):
 class DataEmbedding(nn.Module):
     """Token + positional embedding."""
 
-    def __init__(self, c_in: int, d_model: int, dropout: float = 0.1):
+    def __init__(self, c_in: int, d_model: int, dropout: float = 0.1,
+                 pad_mode: str = "circular"):
         super().__init__()
-        self.token = TokenEmbedding(c_in, d_model)
+        self.token = TokenEmbedding(c_in, d_model, pad_mode)
         self.pos   = PositionalEncoding(d_model, dropout=dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -212,7 +219,17 @@ class ProbSparseSelfAttention(nn.Module):
         # Flatten-and-gather keeps the shape explicit and allocates exactly
         # (B,H,T*sample_k,d) — no mixed-indexing broadcast, no (B,H,T,T,d)
         # intermediate. This is the line that used to allocate 262 GB.
-        idx = torch.randint(T, (B, H, T * sample_k), device=Q.device)
+        #
+        # In eval mode the draw comes from a fixed-seed CPU generator, so the
+        # same checkpoint scores the same every time. Drawing from the global
+        # RNG made evaluation stochastic (0.6169 re-scored vs 0.6204 logged)
+        # and let the best-epoch choice depend on a random draw.
+        if self.training:
+            idx = torch.randint(T, (B, H, T * sample_k), device=Q.device)
+        else:
+            g = torch.Generator().manual_seed(0)
+            idx = torch.randint(T, (B, H, T * sample_k),
+                                generator=g).to(Q.device)
         K_samp = torch.gather(
             K, 2, idx.unsqueeze(-1).expand(B, H, T * sample_k, d)
         ).view(B, H, T, sample_k, d)
@@ -259,10 +276,10 @@ class DistilLayer(nn.Module):
     Applied between encoder attention layers.
     """
 
-    def __init__(self, d_model: int):
+    def __init__(self, d_model: int, pad_mode: str = "circular"):
         super().__init__()
         self.conv = nn.Conv1d(d_model, d_model, kernel_size=3, padding=1,
-                              padding_mode="circular")
+                              padding_mode=pad_mode)
         self.norm = nn.BatchNorm1d(d_model)
         self.act  = nn.ELU()
         self.pool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
@@ -397,6 +414,8 @@ class Informer(nn.Module):
     dropout    : dropout rate (0.1)
     activation : "gelu" | "relu"
     use_distil : whether to apply distillation between encoder layers
+    pad_mode   : "circular" | "replicate" padding for the embedding and
+                 distillation convolutions
     """
 
     def __init__(
@@ -416,6 +435,7 @@ class Informer(nn.Module):
         use_distil : bool  = True,
         attention  : str   = "full",
         n_aux      : int   = 0,
+        pad_mode   : str   = "circular",
     ):
         super().__init__()
         self.pred_len  = pred_len
@@ -424,8 +444,8 @@ class Informer(nn.Module):
         self.n_aux     = n_aux
 
         # Embeddings
-        self.enc_embed = DataEmbedding(c_in, d_model, dropout)
-        self.dec_embed = DataEmbedding(c_in, d_model, dropout)
+        self.enc_embed = DataEmbedding(c_in, d_model, dropout, pad_mode)
+        self.dec_embed = DataEmbedding(c_in, d_model, dropout, pad_mode)
 
         # Encoder
         enc_attn_layers = nn.ModuleList([
@@ -434,7 +454,7 @@ class Informer(nn.Module):
             for _ in range(enc_layers)
         ])
         distil_layers = nn.ModuleList([
-            DistilLayer(d_model)
+            DistilLayer(d_model, pad_mode)
             for _ in range(enc_layers - 1)
         ]) if use_distil else nn.ModuleList()
 

@@ -151,31 +151,58 @@ def _anchor(idx: np.ndarray, y: np.ndarray, n: int
     return xs, y[xs]
 
 
-def _sift(x: np.ndarray, n_sift: int = 8) -> np.ndarray:
+def _mirror(idx: np.ndarray, y: np.ndarray, n: int, n_mirror: int = 2
+            ) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Reflect the outermost extrema across both endpoints (Rilling et al. 2003,
+    simplified) instead of pinning the envelope to the endpoint values.
+
+    Why: `_anchor` forces BOTH envelopes through y[0] and y[n-1], so their mean
+    equals y there and every IMF is exactly 0 at t=0 and t=n-1. Measured on
+    the cache: max |HF RIMF| at t=335 is 0.0 in every window, i.e. the HF
+    branches see nothing at the forecast origin and the whole current level
+    is pushed into the low-frequency residual. Mirroring keeps the spline
+    tame past the outermost extremum without dictating the edge value.
+    """
+    if len(idx) < 2:
+        return _anchor(idx, y, n)
+    left = idx[:n_mirror]
+    right = idx[-n_mirror:]
+    xs = np.concatenate((-left[::-1], idx, 2 * (n - 1) - right[::-1]))
+    ys = np.concatenate((y[left[::-1]], y[idx], y[right[::-1]]))
+    xs, keep = np.unique(xs, return_index=True)
+    return xs, ys[keep]
+
+
+def _sift(x: np.ndarray, n_sift: int = 8, edge: str = "anchor"
+          ) -> np.ndarray:
     """
     Extract ONE IMF — the E_1(.) operator of the CEEMDAN equations.
 
     Fixed iteration count rather than Huang's SD threshold: bounded, fully
     deterministic, and already validated in this repo's deep-dive. A variable
     stopping rule would make the 2.8h precompute non-reproducible.
+
+    edge: "anchor" (original; pins IMFs to 0 at both ends) | "mirror"
     """
     n = len(x)
     grid = np.arange(n)
     h = x.astype(np.float64, copy=True)
+    bound = _mirror if edge == "mirror" else _anchor
     for _ in range(n_sift):
         mx, mn = _extrema(h)
         if len(mx) < 1 or len(mn) < 1:
             break
-        xu, yu = _anchor(mx, h, n)
-        xl, yl = _anchor(mn, h, n)
+        xu, yu = bound(mx, h, n)
+        xl, yl = bound(mn, h, n)
         up = CubicSpline(xu, yu)(grid)
         lo = CubicSpline(xl, yl)(grid)
         h = h - 0.5 * (up + lo)
     return h
 
 
-def emd(x: np.ndarray, max_imf: int = 9, n_sift: int = 8
-        ) -> Tuple[np.ndarray, np.ndarray]:
+def emd(x: np.ndarray, max_imf: int = 9, n_sift: int = 8,
+        edge: str = "anchor") -> Tuple[np.ndarray, np.ndarray]:
     """
     Plain EMD. Returns (imfs (n, T), residual (T,)).
 
@@ -186,7 +213,7 @@ def emd(x: np.ndarray, max_imf: int = 9, n_sift: int = 8
     res = x.copy()
     imfs = []
     for _ in range(max_imf):
-        h = _sift(res, n_sift)
+        h = _sift(res, n_sift, edge)
         imfs.append(h)
         res = res - h
         mx, mn = _extrema(res)
@@ -202,7 +229,7 @@ def emd(x: np.ndarray, max_imf: int = 9, n_sift: int = 8
 # ═════════════════════════════════════════════════════════════════════
 
 def make_noise_bank(n_trials: int, length: int, max_imf: int,
-                    seed: int) -> list:
+                    seed: int, edge: str = "anchor") -> list:
     """
     Pre-compute the EMD modes E_j(w_i) of the noise realisations.
 
@@ -219,7 +246,7 @@ def make_noise_bank(n_trials: int, length: int, max_imf: int,
     bank = []
     for _ in range(n_trials):
         w = rng.standard_normal(length)
-        modes, _ = emd(w, max_imf=max_imf + 2)
+        modes, _ = emd(w, max_imf=max_imf + 2, edge=edge)
         bank.append(modes)
     return bank
 
@@ -232,6 +259,7 @@ def ceemdan(
     n_sift: int = 8,
     noise_bank: Optional[list] = None,
     seed: int = 1234,
+    edge: str = "anchor",
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Complete EEMD with Adaptive Noise (Torres et al. 2011).
@@ -260,7 +288,7 @@ def ceemdan(
         return np.zeros((0, n), dtype=np.float64), x.copy()
 
     if noise_bank is None:
-        noise_bank = make_noise_bank(n_trials, n, max_imf, seed)
+        noise_bank = make_noise_bank(n_trials, n, max_imf, seed, edge)
 
     # Stage-1 uses raw noise; regenerate it deterministically from the bank's
     # seed so the function is self-contained when a bank is passed in.
@@ -286,7 +314,7 @@ def ceemdan(
                 if nm_sd < CONST_EPS:
                     continue
                 pert = res + (noise_std * sd_r / nm_sd) * nm
-            acc += _sift(pert, n_sift)
+            acc += _sift(pert, n_sift, edge)
             used += 1
 
         if used == 0:
@@ -557,6 +585,7 @@ def decompose_window(
         n_sift=cfg["n_sift"],
         noise_bank=noise_bank,
         seed=cfg["noise_seed"],
+        edge=cfg.get("edge_mode", "anchor"),
     )
     n_imf = len(imfs)
 
@@ -588,6 +617,10 @@ def cache_key(cfg: dict) -> str:
     """
     payload = {k: cfg[k] for k in KEY_FIELDS}
     payload["algo_version"] = ALGO_VERSION
+    # Only a NON-default edge mode enters the key, so the existing
+    # anchor-mode cache keeps its hash and stays usable.
+    if cfg.get("edge_mode", "anchor") != "anchor":
+        payload["edge_mode"] = cfg["edge_mode"]
     blob = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest()[:12]
 
@@ -613,7 +646,8 @@ def _worker_init(h5_path: str, cfg: dict) -> None:
     _W["file"] = None
     _W["pid"] = None
     _W["bank"] = make_noise_bank(
-        cfg["n_trials"], cfg["window_len"], cfg["max_imf"], cfg["noise_seed"])
+        cfg["n_trials"], cfg["window_len"], cfg["max_imf"], cfg["noise_seed"],
+        cfg.get("edge_mode", "anchor"))
 
 
 def _worker_file():
@@ -885,6 +919,13 @@ def assemble_branch_inputs(x, rimf, se_rimf, se_orig, cfg):
         order = torch.argsort(se_rimf, dim=1, descending=True)
         hf_idx = order[:, :n_high]
         lf_idx = order[:, n_high:n_high + n_low]
+        if cfg.get("hf_route", "se") == "frequency":
+            # Branch j always receives the j-th FASTEST selected band. SE
+            # order is non-monotone in ~23% of windows, so under "se" the two
+            # HF Informers swap bands window to window and neither can
+            # specialise. "se" stays the default so exp_020/023 reproduce.
+            hf_idx = hf_idx.sort(dim=1).values
+            lf_idx = lf_idx.sort(dim=1).values
     else:
         se_np = se_rimf.detach().cpu().numpy()
         so_np = se_orig.detach().cpu().numpy()

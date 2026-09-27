@@ -444,6 +444,7 @@ def build_splits(
     want_aux:      bool  = False,
     ceemdan_cfg:   Optional[dict] = None,
     verbose:       bool  = True,
+    holdout:       bool  = True,
 ):
     """
     Build train / san_val / dev / test datasets and a fitted normalizer.
@@ -456,13 +457,27 @@ def build_splits(
     Returns
     -------
     ds_train, ds_san_val, ds_dev, ds_test, normalizer, split_stats
+
+    holdout=False is the final-model mode: every split=0 window of all 508
+    basins trains, and ds_san_val is None. The normaliser is fitted on the
+    same split=0 rows either way, so its statistics do not change.
     """
     from splits import build_group_split
 
-    train_idx, san_val_idx, split_stats = build_group_split(
-        train_h5=train_h5, val_fraction=san_val_frac, seed=seed,
-        mode="basin", verbose=verbose,
-    )
+    if holdout:
+        train_idx, san_val_idx, split_stats = build_group_split(
+            train_h5=train_h5, val_fraction=san_val_frac, seed=seed,
+            mode="basin", verbose=verbose,
+        )
+    else:
+        with h5py.File(train_h5, "r") as f:
+            train_idx = np.where(f["split"][:] == SPLIT_TRAIN)[0].astype(
+                np.int64)
+        san_val_idx = np.zeros(0, dtype=np.int64)
+        split_stats = {"method": "all_basins_no_holdout",
+                       "selection_measures": "none (fixed epoch budget)",
+                       "n_train_basins": N_BASINS, "n_val_basins": 0,
+                       "n_train": int(len(train_idx)), "n_san_val": 0}
 
     with h5py.File(train_h5, "r") as f:
         dev_idx = np.where(f["split"][:] == SPLIT_VAL)[0].astype(np.int64)
@@ -531,7 +546,8 @@ def build_splits(
                              rimf_cache=cache, want_aux=want_aux)
 
     ds_train   = mk(train_h5, train_idx,   True,  cache_tr)
-    ds_san_val = mk(train_h5, san_val_idx, True,  cache_tr)
+    ds_san_val = (mk(train_h5, san_val_idx, True, cache_tr)
+                  if len(san_val_idx) else None)
     ds_dev     = mk(train_h5, dev_idx,     True,  cache_tr)
     ds_test    = mk(test_h5, np.arange(n_test, dtype=np.int64), False, cache_te)
 
