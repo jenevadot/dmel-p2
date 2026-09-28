@@ -314,6 +314,38 @@ ABLATION_GRID = [
         overrides   = {"loss": "huber", "huber_delta": 0.5,
                        "base_model": "lstm"},
     ),
+
+    # ══════════════════════════════════════════════════════════════════
+    # FINAL MODEL (2026-09-28) — a 3-family ensemble, each family x 3 seeds,
+    # trained on ALL 508 basins (split=0, no san_val holdout) for a fixed
+    # 40-epoch cosine budget; last-epoch weights. dev (split=1) stays out of
+    # training and is the pre-test check. Families chosen from iteration 2:
+    # mixing families beat adding seeds (MAE + resid-Informer + LSTM = 0.716
+    # dev from single s42 checkpoints, vs 0.685 for the best single model).
+    # Run with --always_suffix so every member is named <family>_s<seed>.
+    # ══════════════════════════════════════════════════════════════════
+    dict(
+        name        = "final_lstm_huber05",
+        priority    = "final",
+        description = "FINAL: LSTM + Huber 0.5, all basins, 40 epochs",
+        overrides   = {"loss": "huber", "huber_delta": 0.5,
+                       "base_model": "lstm", "train_all_basins": True},
+    ),
+    dict(
+        name        = "final_resid_huber05",
+        priority    = "final",
+        description = "FINAL: Informer + residual output + replicate pad, "
+                      "Huber 0.5, all basins, 40 epochs",
+        overrides   = {"loss": "huber", "huber_delta": 0.5,
+                       "residual_output": True, "pad_mode": "replicate",
+                       "train_all_basins": True},
+    ),
+    dict(
+        name        = "final_mae",
+        priority    = "final",
+        description = "FINAL: Informer + MAE, all basins, 40 epochs",
+        overrides   = {"loss": "mae", "train_all_basins": True},
+    ),
 ]
 
 
@@ -398,7 +430,7 @@ def validate_grid(grid=None, verbose: bool = True) -> list:
 # Grid runner
 # ─────────────────────────────────────────────────────────────────────
 
-PRIORITY_ORDER = ["critical", "high", "medium", "low"]
+PRIORITY_ORDER = ["critical", "high", "medium", "low", "final"]
 
 
 def main():
@@ -420,6 +452,8 @@ def main():
         "--seeds", type=int, nargs="+", default=[42],
         help="Seed(s) to run each experiment with",
     )
+    parser.add_argument("--always_suffix", action="store_true",
+                        help="name runs <name>_s<seed> even for one seed")
     parser.add_argument("--validate", action="store_true",
                         help="Only validate the grid, then exit")
     parser.add_argument("--fail_fast", action="store_true",
@@ -480,7 +514,8 @@ def main():
         for seed in args.seeds:
             # Append seed suffix only if multiple seeds requested
             name = (f"{base_name}_s{seed}"
-                    if len(args.seeds) > 1 else base_name)
+                    if len(args.seeds) > 1 or args.always_suffix
+                    else base_name)
 
             overrides = dict(exp["overrides"])
             overrides["seed"] = seed
