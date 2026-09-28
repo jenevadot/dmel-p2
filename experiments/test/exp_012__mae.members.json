@@ -1,0 +1,8 @@
+{
+  "members": [
+    "exp_012__mae"
+  ],
+  "checkpoint": "best_model.pt",
+  "split": "test",
+  "overrides": {}
+}

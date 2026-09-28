@@ -1,0 +1,8 @@
+{
+  "members": [
+    "exp_005__aux_task"
+  ],
+  "checkpoint": "best_model.pt",
+  "split": "test",
+  "overrides": {}
+}

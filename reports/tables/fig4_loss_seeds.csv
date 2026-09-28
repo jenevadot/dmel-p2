@@ -1,0 +1,13 @@
+loss,split,seed,median_nse
+MSE,dev,42,0.6419
+MSE,dev,123,0.6211
+MSE,dev,177,0.6566
+MSE,test,42,0.6316
+Huber δ=0.5,dev,42,0.6657
+Huber δ=0.5,dev,123,0.6637
+Huber δ=0.5,dev,177,0.6690
+Huber δ=0.5,test,42,0.6252
+MAE,dev,42,0.6830
+MAE,dev,123,0.6964
+MAE,dev,177,0.6960
+MAE,test,42,0.6404

@@ -1,0 +1,8 @@
+{
+  "members": [
+    "exp_008__seq168"
+  ],
+  "checkpoint": "best_model.pt",
+  "split": "test",
+  "overrides": {}
+}

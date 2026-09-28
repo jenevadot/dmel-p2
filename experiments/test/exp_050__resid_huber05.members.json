@@ -1,0 +1,8 @@
+{
+  "members": [
+    "exp_050__resid_huber05"
+  ],
+  "checkpoint": "best_model.pt",
+  "split": "test",
+  "overrides": {}
+}

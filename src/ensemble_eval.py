@@ -69,9 +69,12 @@ def _dataset(split, cfg, normalizer, split_seed):
 
     rimf = None
     if cfg.get("use_ceemdan") or cfg.get("rimf_append"):
+        from config import CEEMDAN_CFG
         from decompose import RIMFCache, cache_path
+        # Older config.json files omit the CEEMDAN keys the cache key needs.
+        ccfg = {**CEEMDAN_CFG, **cfg}
         rimf = RIMFCache(str(cache_path(
-            str(TEST_H5 if split == "test" else TRAIN_H5), cfg)))
+            str(TEST_H5 if split == "test" else TRAIN_H5), ccfg)))
 
     kw = dict(seq_len=cfg.get("seq_len", 336),
               input_channels=cfg.get("input_channels"),

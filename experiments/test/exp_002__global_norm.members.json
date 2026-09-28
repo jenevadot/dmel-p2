@@ -1,0 +1,8 @@
+{
+  "members": [
+    "exp_002__global_norm"
+  ],
+  "checkpoint": "best_model.pt",
+  "split": "test",
+  "overrides": {}
+}

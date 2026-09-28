@@ -1,0 +1,8 @@
+{
+  "members": [
+    "exp_015__dropout02"
+  ],
+  "checkpoint": "best_model.pt",
+  "split": "dev",
+  "overrides": {}
+}

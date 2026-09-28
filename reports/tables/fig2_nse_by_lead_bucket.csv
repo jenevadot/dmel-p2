@@ -1,0 +1,11 @@
+split,run,label,h1_12,h13_24,h25_36,h37_48
+dev,exp_001__baseline,"Informer, MSE (baseline)",0.9268,0.7570,0.5756,0.4677
+dev,exp_012__mae,MAE,0.9455,0.7857,0.6246,0.5004
+dev,exp_050__resid_huber05,Residual output + Huber 0.5,0.9482,0.7768,0.6095,0.4944
+dev,exp_053__lstm_huber05,LSTM + Huber 0.5,0.9529,0.7843,0.6289,0.5046
+dev,persistence,persistence,0.9382,0.6865,0.4162,0.2495
+test,exp_001__baseline,"Informer, MSE (baseline)",0.9190,0.7429,0.5883,0.4617
+test,exp_012__mae,MAE,0.9402,0.7528,0.5652,0.4473
+test,exp_050__resid_huber05,Residual output + Huber 0.5,0.9450,0.7671,0.5547,0.4619
+test,exp_053__lstm_huber05,LSTM + Huber 0.5,0.9501,0.7581,0.5721,0.4314
+test,persistence,persistence,0.9165,0.6681,0.3702,0.2037

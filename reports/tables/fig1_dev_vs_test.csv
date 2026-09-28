@@ -1,0 +1,17 @@
+run,label,dev_median_nse,test_median_nse,test_minus_dev,dev_persistence,test_persistence
+exp_020__dmel,DMEL (fixed split),0.3971,0.5182,+0.1211,0.5251,0.4916
+exp_008__seq168,History 168 h,0.5678,0.5737,+0.0059,0.5251,0.4916
+exp_002__global_norm,Global z-score,0.6193,0.5760,-0.0433,0.5251,0.4916
+exp_023__dmel_se_threshold,DMEL (SE threshold),0.5039,0.5837,+0.0798,0.5251,0.4916
+exp_011__nse_loss,NSE loss,0.6075,0.5875,-0.0200,0.5251,0.4916
+exp_038__no_clip,No gradient clipping,0.6296,0.5945,-0.0351,0.5251,0.4916
+exp_051__resid_mse,Residual output + MSE,0.5983,0.6191,+0.0209,0.5251,0.4916
+exp_015__dropout02,Dropout 0.2,0.6607,0.6208,-0.0399,0.5251,0.4916
+exp_010__huber_d05,Huber δ=0.5,0.6657,0.6252,-0.0406,0.5251,0.4916
+exp_001__baseline,"Informer, MSE (baseline)",0.6419,0.6316,-0.0103,0.5251,0.4916
+exp_053__lstm_huber05,LSTM + Huber 0.5,0.6847,0.6337,-0.0510,0.5251,0.4916
+exp_009__huber,Huber δ=1,0.6581,0.6385,-0.0196,0.5251,0.4916
+exp_005__aux_task,Auxiliary forcing task,0.6601,0.6398,-0.0203,0.5251,0.4916
+exp_012__mae,MAE,0.6830,0.6404,-0.0425,0.5251,0.4916
+exp_050__resid_huber05,Residual output + Huber 0.5,0.6733,0.6437,-0.0296,0.5251,0.4916
+exp_052__rimf_append_huber05,CEEMDAN RIMFs as inputs,0.6781,0.6462,-0.0319,0.5251,0.4916
